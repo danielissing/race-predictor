@@ -12,24 +12,22 @@ from utils.strava_utils import build_auth_url, exchange_code_for_token, ensure_t
 from utils.app_utils import load_saved_app_creds, save_app_creds, forget_app_creds, fmt
 
 # CONSTANTS
-
 DATA_DIR = "data"
 APP_CREDS_PATH = Path(DATA_DIR) / "strava_app.json"
-GRADE_BINS = [-100, -20, -12, -8, -5, -3, 0, 3, 5, 8, 12, 20, 100]
+GRADE_BINS = [-100, -30, -20, -12, -8, -5, -3, 0, 3, 5, 8, 12, 20, 30, 100] # used to calculate average speed by grade
 MC_SIMS = 1000  # fixed Monte Carlo runs
-DEFAULT_RIEGEL_K =  1.06
-STEP_LENGTH = 10.0
-STEP_WINDOW = 40.0
-NUM_SIMS = 1000
-MAX_ACTIVITIES = 200
-CLUSTER_RADIUS = 200.0
+DEFAULT_RIEGEL_K =  1.06 # coefficient to account for slowdown over longer distances. Default value is common for road running.
+STEP_LENGTH = 10.0 # length of minimum segment for which we'll calculate the grade (in m)
+STEP_WINDOW = 40.0 # size of sliding window (in m) used to smooth out gpx data
+MAX_ACTIVITIES = 200 # upper limit for how much activities to load from strava (due to API restrictions)
+CLUSTER_RADIUS = 200.0 # aid stations within this radius (in m) will be merged on the map
 EPSILON = 1e-6
 
-st.set_page_config(page_title="Trail Race ETA (Personal)", layout="wide")
-
-st.title("🏃‍♂️ Trail Race ETA")
+st.set_page_config(page_title="Race Time Predictor", layout="wide")
+st.title("🏃‍♂️ Race Time Predictor")
 tab_race, tab_data = st.tabs(["🏁 Upcoming race", "📚 My data"])
 
+# load pace curves and past races if data was already saved (to reduce number of API calls)
 if 'pace_df' not in st.session_state and os.path.exists("data/pace_curves.csv"):
     st.session_state['pace_df'] = pd.read_csv("data/pace_curves.csv")
 if 'used_races' not in st.session_state and os.path.exists("data/used_races.csv"):
@@ -37,7 +35,7 @@ if 'used_races' not in st.session_state and os.path.exists("data/used_races.csv"
 pc = st.session_state.get('pace_df')
 
 with st.sidebar:
-    st.header("Strava (required for pace curves)")
+    st.header("Strava")
     st.caption("Create a Strava API app → set Authorization Callback Domain to **localhost**.")
 
     # 1) Prefill from saved creds → env vars → session (so you rarely retype)
@@ -84,12 +82,13 @@ with st.sidebar:
             forget_app_creds(APP_CREDS_PATH)
             st.success("Forgot saved creds")
 
+    # Add button to build pace curves
     st.divider()
     st.header("Build pace curves")
     st.caption("Uses your Strava **races** only (Run Type = Race).")
     build_btn = st.button("Build from my Strava races", disabled=(tokens is None))
 
-with st.sidebar:
+    # Field to upload upcoming race gpx
     st.header("Course")
     gpx_file = st.file_uploader("Upload race GPX", type=["gpx"])
     # Read the uploaded GPX once and reuse (avoid empty second read)
@@ -102,11 +101,13 @@ with st.sidebar:
     else:
         st.session_state.pop('gpx_bytes', None)
 
-    # You can paste miles or km — we always convert to km internally
+    # Provide distance markers (cumulative) for the aid stations
+    # You can enter in either miles or km, but output will by design be in metric units
     aid_km_text = st.text_input("Aid stations (cumulative distances)", value="10, 21, 33, 50")
     aid_units = st.radio("Aid station units", options=["km", "mi"], index=0, horizontal=True)
     st.caption("All outputs are in metric (km). This only affects the input parsing.")
 
+    # Allow user to add some simple race day conditions - form, weather, and how much weight to put on more recent races
     st.header("User controls")
     feel = st.selectbox("How do you feel?", ["good","ok","meh"], index=1)
     heat = st.selectbox("Heat", ["cool","moderate","hot"], index=0)
@@ -116,6 +117,7 @@ with st.sidebar:
         value="mild",
         help="Give recent races a bit more weight when building your pace curve."
     )
+    # ensure that we update predictions / course map if user inputs change
     fingerprint = (aid_km_text, aid_units, heat, feel)
     if st.session_state.get('eta_fingerprint') != fingerprint:
         st.session_state.pop('eta_results', None)
@@ -126,6 +128,7 @@ if build_btn and tokens:
     try:
         acts = list_activities(tokens["access_token"], per_page=200)
         pace_df, used_df, meta = build_pace_curves_from_races(tokens["access_token"], acts, GRADE_BINS, max_activities=MAX_ACTIVITIES, recency_mode=recency_mode)
+        # to share variables between reruns, assign them to session states
         st.session_state['pace_df'] = pace_df
         st.session_state['used_races'] = used_df
         st.session_state['model_meta'] = meta
@@ -149,9 +152,20 @@ with tab_race:
     else:
         try:
             df_map = parse_gpx(st.session_state['gpx_bytes'])
+            # resample at fixed distance + smooth grade 
+            df_res = resample_with_grade(df_map, step_m=STEP_LENGTH, window_m=STEP_WINDOW)
 
-            # Parse the aid-station list (you already have a km/mi parser if you added it)
-            # If you added parse_cumulative_dist earlier, use that; otherwise keep your existing km parsing:
+            # whole-course stats using the same hysteresis/resampling as segments
+            length_km, gain_m, loss_m, min_ele, max_ele = segment_stats(df_res)
+
+            # show summary above the map
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Course length", f"{length_km:.1f} km")
+            c2.metric("Total gain", f"{gain_m:.0f} m")
+            c3.metric("Total loss", f"{loss_m:.0f} m")
+            st.caption(f"Elevation range: {min_ele:.0f}–{max_ele:.0f} m")
+
+            # Parse the aid-station list
             try:
                 aid_km_list = parse_cumulative_dist(aid_km_text, aid_units)  # if you added the units toggle
             except NameError:
@@ -177,7 +191,7 @@ with tab_race:
                     popup=folium.Popup(html=f"<b>{label}</b><br/>{km_list}", max_width=250)
                 ).add_to(m)
 
-            # Render in Streamlit
+            # Render in Streamlit (display the map)
             st_folium(m, width=None, height=500)
 
         except Exception as e:
@@ -189,7 +203,7 @@ with tab_race:
     if gpx_file is not None:
         try:
             df_raw = parse_gpx(st.session_state['gpx_bytes'])
-            df = resample_with_grade(df_raw, step_m=STEP_LENGTH, window_m=STEP_WINDOW)
+            df = resample_with_grade(df_raw, step_m=STEP_LENGTH, window_m=STEP_WINDOW) # smoothing over gpx points
             aid_km_list = parse_cumulative_dist(aid_km_text, aid_units)  # returns km
             legs_idx = legs_from_aid_stations(df, aid_km_list)
             # names: Start -> AS1, AS1 -> AS2, ..., last -> Finish
@@ -206,7 +220,7 @@ with tab_race:
                     st.write(pd.DataFrame({
                         "Metric": ["Length (km)", "Elevation gain (m)", "Elevation loss (m)", "Min elev (m)",
                                    "Max elev (m)"],
-                        "Value": [round(length_km, 2), int(gain_m), int(loss_m), int(min_ele), int(max_ele)]
+                        "Value": [round(length_km, 1), int(gain_m), int(loss_m), int(min_ele), int(max_ele)]
                     }))
                     x_km = (seg['dist_m'] - seg['dist_m'].iloc[0]) / 1000.0
                     y_m = seg['ele_m']
@@ -215,11 +229,11 @@ with tab_race:
                     ax.set_xlabel("Distance (km)")
                     ax.set_ylabel("Elevation (m)")
                     ax.set_title(title)
-                    st.pyplot(fig)  # don't clear here
+                    st.pyplot(fig)
                     plt.close(fig)  # explicitly close the figure after Streamlit has copied it
                 seg_rows.append({
                     "Segment": title,
-                    "Km": round(length_km, 2),
+                    "Km": round(length_km, 1),
                     "Gain_m": int(gain_m),
                     "Loss_m": int(loss_m),
                     "Min_ele_m": int(min_ele),
@@ -290,7 +304,7 @@ with tab_race:
             np.random.seed(seed)
 
             # 7) run sim (assumes simulate_etas returns P10/P50/P90)
-            p10, p50, p90 = simulate_etas(legs_meters, speeds, sigmas, leg_ends_x, heat, feel, sims=NUM_SIMS)
+            p10, p50, p90 = simulate_etas(legs_meters, speeds, sigmas, leg_ends_x, heat, feel, sims=MC_SIMS)
 
             # 8) Stamina scaling via personal Riegel exponent k ---
             meta = st.session_state.get('model_meta') or {}
