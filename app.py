@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import folium
 from streamlit_folium import st_folium
 import hashlib
-from utils.gpx import parse_gpx, legs_from_aid_stations, distance_by_grade_bins, segment_stats, aid_station_markers, resample_with_grade, apply_ultra_adjustments_progressive, parse_cumulative_dist, build_pace_curves_from_races, altitude_impairment_multiplicative
+from utils.gpx_utils import parse_gpx, legs_from_aid_stations, compute_course_context, course_fingerprint, distance_by_grade_bins, segment_stats, aid_station_markers, resample_with_grade, apply_ultra_adjustments_progressive, parse_cumulative_dist, build_pace_curves_from_races, altitude_impairment_multiplicative
 from model.predictor import simulate_etas
 from utils.strava_utils import build_auth_url, exchange_code_for_token, ensure_token, list_activities
 from utils.app_utils import load_saved_app_creds, save_app_creds, forget_app_creds, fmt
@@ -23,6 +23,26 @@ MAX_ACTIVITIES = 200 # upper limit for how much activities to load from strava (
 CLUSTER_RADIUS = 200.0 # aid stations within this radius (in m) will be merged on the map
 EPSILON = 1e-6
 
+# METHODS
+def get_course_context(aid_km_text: str, aid_units: str, grade_bins: list[float]):
+    """Cache the computed course context in st.session_state."""
+    gpx_bytes = st.session_state.get("gpx_bytes")
+    if not gpx_bytes:
+        st.session_state.pop("course_ctx", None)
+        st.session_state.pop("course_ctx_fp", None)
+        return None
+
+    fp = course_fingerprint(gpx_bytes, aid_km_text, aid_units, grade_bins, STEP_LENGTH, STEP_WINDOW)
+    if st.session_state.get("course_ctx_fp") != fp:
+        ctx = compute_course_context(
+            gpx_bytes, aid_km_text, aid_units, grade_bins,
+            step_length=STEP_LENGTH, step_window=STEP_WINDOW
+        )
+        st.session_state["course_ctx"] = ctx
+        st.session_state["course_ctx_fp"] = fp
+    return st.session_state.get("course_ctx")
+
+# UI
 st.set_page_config(page_title="Race Time Predictor", layout="wide")
 st.title("🏃‍♂️ Race Time Predictor")
 tab_race, tab_data = st.tabs(["🏁 Upcoming race", "📚 My data"])
@@ -105,6 +125,9 @@ with st.sidebar:
     # You can enter in either miles or km, but output will by design be in metric units
     aid_km_text = st.text_input("Aid stations (cumulative distances)", value="10, 21, 33, 50")
     aid_units = st.radio("Aid station units", options=["km", "mi"], index=0, horizontal=True)
+
+    # Build/refresh course context AFTER inputs exist
+    ctx = get_course_context(aid_km_text, aid_units, GRADE_BINS)
     st.caption("All outputs are in metric (km). This only affects the input parsing.")
 
     # Allow user to add some simple race day conditions - form, weather, and how much weight to put on more recent races
@@ -118,7 +141,8 @@ with st.sidebar:
         help="Give recent races a bit more weight when building your pace curve."
     )
     # ensure that we update predictions / course map if user inputs change
-    fingerprint = (aid_km_text, aid_units, heat, feel)
+    course_fp = st.session_state.get("course_ctx_fp")
+    fingerprint = (aid_km_text, aid_units, heat, feel, course_fp)
     if st.session_state.get('eta_fingerprint') != fingerprint:
         st.session_state.pop('eta_results', None)
         st.session_state['eta_fingerprint'] = fingerprint
@@ -147,18 +171,15 @@ if build_btn and tokens:
 with tab_race:
     st.subheader("Course map (GPX + aid stations)")
 
-    if st.session_state.get('gpx_bytes') is None:
+    if not ctx:
         st.info("Upload a GPX to view the route map.")
     else:
         try:
-            df_map = parse_gpx(st.session_state['gpx_bytes'])
-            # resample at fixed distance + smooth grade 
-            df_res = resample_with_grade(df_map, step_m=STEP_LENGTH, window_m=STEP_WINDOW)
+            df_map = ctx["df_raw"]  # original coords for drawing the line
+            df_res = ctx["df_res"]  # resampled (for totals)
+            length_km, gain_m, loss_m, min_ele, max_ele = ctx["course_stats"]
 
-            # whole-course stats using the same hysteresis/resampling as segments
-            length_km, gain_m, loss_m, min_ele, max_ele = segment_stats(df_res)
-
-            # show summary above the map
+            # Totals above the map
             c1, c2, c3 = st.columns(3)
             c1.metric("Course length", f"{length_km:.1f} km")
             c2.metric("Total gain", f"{gain_m:.0f} m")
@@ -200,12 +221,13 @@ with tab_race:
     # Segments overview
     st.divider()
     st.subheader("Segments overview")
-    if gpx_file is not None:
+    #ctx = get_course_context(st.session_state.get("gpx_bytes"), aid_km_text, aid_units, GRADE_BINS)
+    if not ctx:
+        st.info("Upload a GPX to see segment breakdown.")
+    else:
         try:
-            df_raw = parse_gpx(st.session_state['gpx_bytes'])
-            df = resample_with_grade(df_raw, step_m=STEP_LENGTH, window_m=STEP_WINDOW) # smoothing over gpx points
-            aid_km_list = parse_cumulative_dist(aid_km_text, aid_units)  # returns km
-            legs_idx = legs_from_aid_stations(df, aid_km_list)
+            df = ctx["df_res"]
+            legs_idx = ctx["legs_idx"]
             # names: Start -> AS1, AS1 -> AS2, ..., last -> Finish
             names_list = [f"AS{i + 1}" for i in range(len(legs_idx) - 1)] + ["Finish"]
 
@@ -254,46 +276,33 @@ with tab_race:
     # Compute once on click, then cache in session_state
     if predict_btn and gpx_file is not None and pc is not None:
         try:
-            # 0) sanity on pace curves vs bins
+            # 1) sanity on pace curves vs bins
             if len(pc) != len(GRADE_BINS) - 1:
                 st.error(f"Pace curves bins ({len(pc)}) do not match expected ({len(GRADE_BINS) - 1}). "
                          f"Try rebuilding curves from Strava.")
                 raise RuntimeError("pace_df/bin mismatch")
 
-            df = parse_gpx(st.session_state['gpx_bytes'])
-            aid_km = parse_cumulative_dist(aid_km_text, aid_units)  # returns km
-
-            # 1) build legs by GPX indices
-            legs_idx = legs_from_aid_stations(df, aid_km)
-
-            # 2) per-leg meters by fixed grade bins
-            legs_meters = []
-            for (a, b) in legs_idx:
-                seg = df.iloc[a:b + 1]
-                meters = distance_by_grade_bins(seg, GRADE_BINS)
-                if meters.sum() > 1.0:
-                    legs_meters.append(meters)
-
-            n = len(legs_meters)
-            if n == 0:
+            # 2) build legs by GPX indices
+            #ctx = get_course_context(st.session_state.get("gpx_bytes"), aid_km_text, aid_units, GRADE_BINS)
+            if not ctx or len(ctx["legs_meters"]) == 0:
                 st.error("Could not derive segments from GPX + aid-station list.")
-                raise RuntimeError("no legs")
+            else:
+                legs_meters = ctx["legs_meters"]
+                leg_end_km = ctx["leg_end_km"]
+                leg_ends_x = ctx["leg_ends_x"]
+                total_km = ctx["total_km"]
+                df = ctx["df_res"]
 
-            # 3) derive each leg’s end km from the GPX itself (not the user list)
-            leg_end_km = [float(df.iloc[b]['dist_m']) / 1000.0 for (_, b) in legs_idx][:n]
-
-            # 4)  Course altitude factor (median elevation from GPX)
+            # 3)  Course altitude factor (median elevation from GPX)
             H_course = float(np.nanmedian(df['ele_m'].to_numpy(dtype=float)))
             A_course = altitude_impairment_multiplicative(H_course)  # <= 1.0
 
-            # 5) Use SEA-LEVEL curve and apply course altitude penalty
+            # 4) Use SEA-LEVEL curve and apply course altitude penalty
             speeds_sl = pc["speed_mps"].values
             sigmas = pc["sigma_rel"].values
             speeds = speeds_sl * A_course
-            total_km = float(df["dist_m"].iloc[-1]) / 1000.0
-            leg_ends_x = [min(1.0, k / max(total_km, EPSILON)) for k in leg_end_km]
 
-            # 6) Use deterministic seed so identical inputs => identical ETAs
+            # 5) Use deterministic seed so identical inputs => identical ETAs
             seed_payload = str([GRADE_BINS,
                                 list(np.round(speeds, 5)),
                                 list(np.round(sigmas, 5)),
@@ -303,10 +312,10 @@ with tab_race:
             seed = int(hashlib.sha256(seed_payload.encode()).hexdigest(), 16) % (2 ** 32)
             np.random.seed(seed)
 
-            # 7) run sim (assumes simulate_etas returns P10/P50/P90)
+            # 6) run sim (assumes simulate_etas returns P10/P50/P90)
             p10, p50, p90 = simulate_etas(legs_meters, speeds, sigmas, leg_ends_x, heat, feel, sims=MC_SIMS)
 
-            # 8) Stamina scaling via personal Riegel exponent k ---
+            # 7) Stamina scaling via personal Riegel exponent k ---
             meta = st.session_state.get('model_meta') or {}
             k = float(meta.get('riegel_k', DEFAULT_RIEGEL_K))
             Dref = meta.get('ref_distance_km', None)
@@ -314,7 +323,7 @@ with tab_race:
 
             total_km = float(df["dist_m"].iloc[-1]) / 1000.0
 
-            # Keep track of Riegel scaling actually applied (we only slow down; never speed up)
+            # 8) Keep track of Riegel scaling actually applied (we only slow down; never speed up)
             riegel_applied = False
             riegel_scale = 1.0
             if Dref and Tref and total_km > 0:
@@ -327,10 +336,10 @@ with tab_race:
                     riegel_applied = True
                     riegel_scale = s
 
-            # 8b) Add adjustment for very long races and make sure percentiles skew right
+            # 9) Add adjustment for very long races and make sure percentiles skew right
             p10, p50, p90, ultra_meta = apply_ultra_adjustments_progressive(p10, p50, p90, leg_ends_x)
 
-            # 8c) Build a meta record for this prediction and cache it so it persists across reruns
+            # 10) Build a meta record for this prediction and cache it so it persists across reruns
             pred_meta = {
                 "course_median_alt_m": float(H_course),
                 "alt_speed_factor": float(A_course),  # multiplier on speeds (<1 means slower than sea level)
@@ -345,16 +354,16 @@ with tab_race:
             }
             st.session_state["prediction_meta"] = pred_meta
 
-            # 9) Annotate the UI with course altitude and the applied factor
+            # 11) Annotate the UI with course altitude and the applied factor
             st.caption(
                 f"Course median altitude ≈ {H_course:.0f} m → altitude factor {A_course:.2f}. Riegel k = {k:.2f}.")
 
-            # 10) defend against any residual length drift
-            L = min(n, len(leg_end_km), len(p10), len(p50), len(p90))
+            # 12) defend against any residual length drift
+            L = min(len(leg_end_km), len(p10), len(p50), len(p90))
             leg_end_km = leg_end_km[:L]
             p10, p50, p90 = p10[:L], p50[:L], p90[:L]
 
-            # 11) Auto-label: AS1..AS(L-1), Finish
+            # 13) Auto-label: AS1..AS(L-1), Finish
             names = [f"AS{i + 1}" for i in range(L - 1)] + ["Finish"]
 
             out = pd.DataFrame({

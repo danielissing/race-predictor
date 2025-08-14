@@ -19,6 +19,69 @@ DEFAULT_RIEGEL_K =  1.06 # penalty for long races
 MILES_TO_KM = 1.609344
 SECONDS_PER_HOUR = 3600.0
 
+def course_fingerprint(
+    gpx_bytes: bytes,
+    aid_km_text: str,
+    aid_units: str,
+    grade_bins: list[float],
+    step_length: float = 10.0,
+    step_window: float = 40.0,
+) -> str:
+    """A deterministic key to decide when to recompute the course context."""
+    h = hashlib.md5(gpx_bytes).hexdigest()
+    bins_sig = ",".join(f"{x:.4f}" for x in grade_bins)
+    return f"{h}|{aid_km_text.strip()}|{aid_units}|{bins_sig}|{step_length:.1f}|{step_window:.1f}"
+
+def compute_course_context(
+    gpx_bytes: bytes,
+    aid_km_text: str,
+    aid_units: str,
+    grade_bins: list[float],
+    step_length: float = 10.0,
+    step_window: float = 40.0,
+):
+    """
+    Pure function: build all course-derived artifacts, no Streamlit, no caching.
+    Returns a dict with:
+      df_raw, df_res, course_stats, aid_km, legs_idx, legs_meters, leg_end_km, leg_ends_x, total_km
+    """
+    # These functions are assumed to be in this module already:
+    # parse_gpx, resample_with_grade, segment_stats, legs_from_aid_stations, distance_by_grade_bins
+
+    df_raw = parse_gpx(gpx_bytes)
+    df_res = resample_with_grade(df_raw, step_m=step_length, window_m=step_window)
+
+    length_km, gain_m, loss_m, min_ele, max_ele = segment_stats(df_res)
+
+    # Aid stations (to km), leg indices on the resampled track
+    aid_km = parse_cumulative_dist(aid_km_text, aid_units)
+    legs_idx = legs_from_aid_stations(df_res, aid_km)
+
+    # Per-leg meters by grade bins + leg end positions
+    legs_meters, leg_end_km = [], []
+    total_km = float(df_res["dist_m"].iloc[-1]) / 1000.0 if len(df_res) else 0.0
+
+    for (a, b) in legs_idx:
+        seg = df_res.iloc[a:b+1]
+        meters = distance_by_grade_bins(seg, grade_bins)
+        if meters.sum() > 1.0:
+            legs_meters.append(meters)
+            leg_end_km.append(float(seg["dist_m"].iloc[-1]) / 1000.0)
+
+    leg_ends_x = [min(1.0, km / max(total_km, 1e-6)) for km in leg_end_km] if total_km > 0 else []
+
+    return dict(
+        df_raw=df_raw,
+        df_res=df_res,
+        course_stats=(length_km, gain_m, loss_m, min_ele, max_ele),
+        aid_km=aid_km,
+        legs_idx=legs_idx,
+        legs_meters=legs_meters,
+        leg_end_km=leg_end_km,
+        leg_ends_x=leg_ends_x,
+        total_km=total_km,
+    )
+
 def _haversine_m(a1,b1,a2,b2):
     p1,p2=math.radians(a1),math.radians(a2)
     d1=math.radians(a2-a1); d2=math.radians(b2-b1)
