@@ -7,7 +7,7 @@ import folium
 from streamlit_folium import st_folium
 import hashlib
 from utils.gpx import parse_gpx, legs_from_aid_stations, distance_by_grade_bins, segment_stats, aid_station_markers, resample_with_grade, apply_ultra_adjustments_progressive, parse_cumulative_dist, build_pace_curves_from_races, altitude_impairment_multiplicative
-from models.predictor import simulate_etas
+from model.predictor import simulate_etas
 from utils.strava_utils import build_auth_url, exchange_code_for_token, ensure_token, list_activities
 from utils.app_utils import load_saved_app_creds, save_app_creds, forget_app_creds, fmt
 

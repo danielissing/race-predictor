@@ -1,0 +1,42 @@
+# --- Virtual envs
+.venv/
+venv/
+env/
+
+# --- Python cruft
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Notebooks
+.ipynb_checkpoints/
+
+# --- Build artifacts
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# --- Streamlit secrets (keep out of Git)
+.streamlit/secrets.toml
+
+# (Optional) ignore all local Streamlit config in repo
+# .streamlit/
+
+# --- Env files with credentials
+.env
+.env.*
+*.env
+
+# --- Editors/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
