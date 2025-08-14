@@ -1,7 +1,14 @@
-# --- Virtual envs
+# keep ALL local data & caches out of Git
+data/
+
+# Python/Streamlit secrets & env
 .venv/
 venv/
 env/
+.env
+.env.*
+*.env
+.streamlit/secrets.toml
 
 # --- Python cruft
 __pycache__/
@@ -24,16 +31,8 @@ dist/
 *.egg-info/
 pip-wheel-metadata/
 
-# --- Streamlit secrets (keep out of Git)
-.streamlit/secrets.toml
-
-# (Optional) ignore all local Streamlit config in repo
-# .streamlit/
-
-# --- Env files with credentials
-.env
-.env.*
-*.env
+# --- Streamlit
+.streamlit
 
 # --- Editors/OS
 .vscode/
