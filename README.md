@@ -87,6 +87,8 @@ In the app’s left sidebar:
 * The app stores them in `data/strava_app.json` (plain JSON on your machine).
 * Tokens from Strava are stored in `data/strava_tokens.json` and refreshed automatically.
 
+![sidebar1](https://github.com/danielissing/race-predictor/blob/main/images/sidebar_1.png)
+
 > Privacy: All data (creds, tokens, cached activity streams) stays on your computer in the `data/` folder. Nothing is uploaded.
 
 ---
@@ -99,20 +101,23 @@ In the app’s left sidebar:
 * **Aid stations**: paste **cumulative** distances, e.g. `10, 21, 33, 50`.
 
   * Toggle **km / mi** for the input. All outputs are metric.
-* **Conditions**: choose **Heat** (cool/moderate/hot) and **Feeling** (good/ok/meh) to adjust for race-day conditions.
+* **Conditions**: choose **Heat** (cool/moderate/hot), **Feeling** (good/ok/meh) and **Recency Weighing** (how much weight to put on more recent results) to adjust for race-day conditions.
 
+![sidebar2](https://github.com/danielissing/race-predictor/blob/main/images/sidebar_2.png)
 #### Course map
 
 * Shows your route over **OpenStreetMap**.
 * Aid stations are **merged** if they are very close to one another (default 200 m). If a station is reused, the marker label shows **AS1/AS4**, etc.
+* Example: ![course](https://github.com/danielissing/race-predictor/blob/main/images/course_view.png)
 
 #### Segments overview
 
 * Each leg (Start→AS1, AS1→AS2, …) has:
 
-  * an **elevation mini-plot**
+  * an **elevation mini-plot** (click to expand)
   * **length (km)**, **elevation gain/loss (m)**, **min/max elevation**
 * Elevation gain/loss uses distance-based resampling and a small hysteresis threshold to avoid over-counting tiny wiggles (closer to watch values).
+* Example: ![segments](https://github.com/danielissing/race-predictor/blob/main/images/segments.png)
 
 ---
 
@@ -122,17 +127,19 @@ In the app’s left sidebar:
 * The model bins by grade and computes your **median speed per bin** (with variability from 10th–90th percentile spread).
 * A list of **races used** (name/date/distance) is shown to sanity-check.
 * Pace curves and used races are saved to `data/pace_curves.csv` and `data/used_races.csv` so they reload automatically on restart.
+* Output: ![pace_curves](https://github.com/danielissing/race-predictor/blob/main/images/pace_curves.png)
 
-#### C) Predict ETAs
+### C) Predict ETAs
 
 * Click **Run prediction**.
 * You’ll get a table of **ETA P10 / P50 / P90** at each station and can **download CSV**.
 * Results are cached, so clicking **Download** doesn’t recompute. Recompute only when you click **Run** again or change inputs.
+* Output: ![etas](https://github.com/danielissing/race-predictor/blob/main/images/etas.png)
 
 > Notes:
 >
 > * Streams are **cached** to `data/strava_cache/streams_<activity_id>.json` so you don’t re-hit the API.
-> * You can limit to the **last 24 months** and cap a **max number of races** (configurable in code).
+> * You can decide to only include races from the last X months and cap a **max number of races** (configurable in code).
 
 ---
 
