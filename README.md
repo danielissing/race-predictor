@@ -56,16 +56,7 @@ py -m pip install -r requirements.txt
 streamlit run app.py
 ```
 
-App opens at `http://localhost:8501`.
-
-> Tip (Windows): create `run.ps1`:
->
-> ```powershell
-> . .\.venv\Scripts\Activate.ps1
-> streamlit run app.py
-> ```
->
-> Then just `.\run.ps1`.
+App opens at `http://localhost:8501` (or similar)
 
 ---
 
@@ -77,15 +68,18 @@ App opens at `http://localhost:8501`.
 
 You don’t need to add a Redirect URI per se; the app uses `http://localhost:8501` and Strava only checks the domain (`localhost`) against your Authorization Callback Domain.
 
+![setup](https://github.com/danielissing/race-predictor/blob/main/images/api_setup.png)
 ---
 
 ## Connecting the App to Strava
 
 In the app’s left sidebar:
 
-1. Enter **Client ID** and **Client Secret**.
+1. Enter **Client ID** and **Client Secret** (see image below for where to find them).
 2. Click **Connect Strava** and approve.
 3. On success, you’ll see **Connected ✅**.
+
+![api_details](https://github.com/danielissing/race-predictor/blob/main/images/strava_api_details.png)
 
 ### Save creds (so you don’t retype next time)
 
