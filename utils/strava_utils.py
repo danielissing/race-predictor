@@ -1,24 +1,21 @@
-import os, time, json, requests
+import os
+import time
+import json
+import requests
 from typing import Dict, Any, List
 from urllib.parse import urlencode
+import config
 
-STRAVA_AUTH_URL = "https://www.strava.com/oauth/authorize"
-STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
-API_BASE = "https://www.strava.com/api/v3"
-TOKENS_PATH = os.path.join("data", "strava_tokens.json")
-CACHE_DIR = os.path.join("data", "strava_cache")
-DEFAULT_TIMEOUT = 30
-
-os.makedirs(CACHE_DIR, exist_ok=True)
+os.makedirs(config.CACHE_DIR, exist_ok=True)
 
 def save_tokens(tokens: Dict[str, Any]):
-    with open(TOKENS_PATH, "w") as f:
+    with open(config.TOKENS_PATH, "w") as f:
         json.dump(tokens, f)
 
 def load_tokens() -> Dict[str, Any] | None:
-    if not os.path.exists(TOKENS_PATH):
+    if not os.path.exists(config.TOKENS_PATH):
         return None
-    with open(TOKENS_PATH, "r") as f:
+    with open(config.TOKENS_PATH, "r") as f:
         return json.load(f)
 
 def build_auth_url(client_id: str, redirect_uri: str, scope: str="read,activity:read_all", approval_prompt: str="auto") -> str:
@@ -26,14 +23,14 @@ def build_auth_url(client_id: str, redirect_uri: str, scope: str="read,activity:
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "approval_prompt": approval_prompt,  # "auto" or "force"
+        "approval_prompt": approval_prompt,
         "scope": scope,
     }
-    return f"{STRAVA_AUTH_URL}?{urlencode(params)}"
+    return f"{config.STRAVA_AUTH_URL}?{urlencode(params)}"
 
 def exchange_code_for_token(client_id: str, client_secret: str, code: str) -> Dict[str, Any]:
     payload = {"client_id": client_id, "client_secret": client_secret, "code": code, "grant_type": "authorization_code"}
-    r = requests.post(STRAVA_TOKEN_URL, data=payload, timeout=DEFAULT_TIMEOUT)
+    r = requests.post(config.STRAVA_TOKEN_URL, data=payload, timeout=config.DEFAULT_TIMEOUT)
     r.raise_for_status()
     tokens = r.json()
     tokens["obtained_at"] = int(time.time())
@@ -43,7 +40,7 @@ def exchange_code_for_token(client_id: str, client_secret: str, code: str) -> Di
 
 def refresh_access_token(client_id: str, client_secret: str, refresh_token: str) -> Dict[str, Any]:
     payload = {"client_id": client_id, "client_secret": client_secret, "grant_type": "refresh_token", "refresh_token": refresh_token}
-    r = requests.post(STRAVA_TOKEN_URL, data=payload, timeout=DEFAULT_TIMEOUT); r.raise_for_status()
+    r = requests.post(config.STRAVA_TOKEN_URL, data=payload, timeout=config.DEFAULT_TIMEOUT); r.raise_for_status()
     if r.status_code >= 400:
         raise requests.HTTPError(f"{r.status_code} {r.text}", response=r)
     tokens = r.json(); tokens["obtained_at"] = int(time.time()); save_tokens(tokens);
@@ -54,7 +51,7 @@ def get_headers(access_token: str) -> Dict[str, str]:
 
 def disconnect_strava():
     try:
-        os.remove(TOKENS_PATH)
+        os.remove(config.TOKENS_PATH)
     except FileNotFoundError:
         pass
 
@@ -84,7 +81,7 @@ def list_activities(access_token: str, per_page: int=200) -> List[Dict[str, Any]
     params = {"per_page": min(per_page, 200)}
     while True:
         params["page"] = page
-        r = requests.get(f"{API_BASE}/athlete/activities", headers=headers, params=params, timeout=DEFAULT_TIMEOUT)
+        r = requests.get(f"{config.API_BASE}/athlete/activities", headers=headers, params=params, timeout=config.DEFAULT_TIMEOUT)
         if r.status_code == 429: raise RuntimeError("Rate limit hit. Try again later.")
         r.raise_for_status(); batch = r.json()
         if not batch: break
@@ -117,17 +114,17 @@ def get_activity_streams(access_token: str, activity_id: int, types=None) -> Dic
         types = ["time","distance","altitude","velocity_smooth","grade_smooth","moving","latlng"]
 
     # --- local cache first ---
-    path = os.path.join(CACHE_DIR, f"streams_{activity_id}.json")
+    path = os.path.join(config.CACHE_DIR, f"streams_{activity_id}.json")
     if os.path.exists(path):
         with open(path, "r") as f:
             return json.load(f)
 
     # --- call Strava ---
     r = requests.get(
-        f"{API_BASE}/activities/{activity_id}/streams",
+        f"{config.API_BASE}/activities/{activity_id}/streams",
         headers=get_headers(access_token),
         params={"keys": ",".join(types), "key_by_type":"true"},
-        timeout=DEFAULT_TIMEOUT
+        timeout=config.DEFAULT_TIMEOUT
     )
 
     # Rate limit → show friendly wait time

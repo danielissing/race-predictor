@@ -1,4 +1,5 @@
 import os, json
+import config
 
 def load_saved_app_creds( app_credits_path: str):
     try:
@@ -18,8 +19,9 @@ def forget_app_creds(app_credits_path: str):
     except FileNotFoundError:
         pass
 
-def fmt(sec):
-    sec = int(sec);
-    h = sec // 3600;
-    m = (sec % 3600) // 60;
+def fmt(sec: int) -> str:
+    """Formats seconds into H:MM format."""
+    sec = int(sec)
+    h = sec // config.SECONDS_PER_HOUR
+    m = (sec % config.SECONDS_PER_HOUR) // config.MINUTES_PER_HOUR
     return f"{h:d}:{m:02d}"

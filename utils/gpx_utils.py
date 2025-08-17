@@ -1,32 +1,21 @@
-import numpy as np, pandas as pd
+import numpy as np
+import pandas as pd
 from typing import Dict, Any, List, Tuple
 from datetime import datetime, timezone
-import io, math, gpxpy
-from utils.strava_utils import is_run, is_race, get_activity_streams
+import io
+import math
+import gpxpy
 import hashlib
-
-EARTH_R = 6371000.0
-CLUSTER_RADIUS = 200.0
-ALPHA = 0.06
-H0 = 300.0
-MONTH_LENGTH = 30.437
-STEP_LENGTH = 10.0
-STEP_WINDOW = 40.0
-REST_PER_24H = 2.0  # hours of total rest per 24h of racing
-ULTRA_GAMMA = 0.30  # +30% slowdown per 24h beyond threshold
-START_TH_H = 20.0  # threshold (hours) before slowdowns kick in
-MILD_HALF_LIFE = 18.0 # for regency considerations
-DEFAULT_RIEGEL_K =  1.06 # penalty for long races
-MILES_TO_KM = 1.609344
-SECONDS_PER_HOUR = 3600.0
+from utils.strava_utils import get_activity_streams, is_run, is_race
+import config 
 
 def course_fingerprint(
     gpx_bytes: bytes,
     aid_km_text: str,
     aid_units: str,
     grade_bins: list[float],
-    step_length: float = 10.0,
-    step_window: float = 40.0,
+    step_length: float = config.STEP_LENGTH,
+    step_window: float = config.STEP_WINDOW,
 ) -> str:
     """A deterministic key to decide when to recompute the course context."""
     h = hashlib.md5(gpx_bytes).hexdigest()
@@ -38,16 +27,14 @@ def compute_course_context(
     aid_km_text: str,
     aid_units: str,
     grade_bins: list[float],
-    step_length: float = 10.0,
-    step_window: float = 40.0,
+    step_length: float = config.STEP_LENGTH,
+    step_window: float = config.STEP_WINDOW,
 ):
     """
     Pure function: build all course-derived artifacts, no Streamlit, no caching.
     Returns a dict with:
       df_raw, df_res, course_stats, aid_km, legs_idx, legs_meters, leg_end_km, leg_ends_x, total_km
     """
-    # These functions are assumed to be in this module already:
-    # parse_gpx, resample_with_grade, segment_stats, legs_from_aid_stations, distance_by_grade_bins
 
     df_raw = parse_gpx(gpx_bytes)
     df_res = resample_with_grade(df_raw, step_m=step_length, window_m=step_window)
@@ -69,7 +56,7 @@ def compute_course_context(
             legs_meters.append(meters)
             leg_end_km.append(float(seg["dist_m"].iloc[-1]) / 1000.0)
 
-    leg_ends_x = [min(1.0, km / max(total_km, 1e-6)) for km in leg_end_km] if total_km > 0 else []
+    leg_ends_x = [min(1.0, km / max(total_km, config.EPSILON)) for km in leg_end_km] if total_km > 0 else []
 
     return dict(
         df_raw=df_raw,
@@ -83,33 +70,38 @@ def compute_course_context(
         total_km=total_km,
     )
 
-def _haversine_m(a1,b1,a2,b2):
-    p1,p2=math.radians(a1),math.radians(a2)
-    d1=math.radians(a2-a1); d2=math.radians(b2-b1)
-    x=math.sin(d1/2)**2+math.cos(p1)*math.cos(p2)*math.sin(d2/2)**2
-    return 2*EARTH_R*math.atan2(math.sqrt(x), math.sqrt(1-x))
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate the great-circle distance between two points on the earth (in meters)."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    d1 = math.radians(lat2 - lat1)
+    d2 = math.radians(lon2 - lon1)
+    x = math.sin(d1 / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(d2 / 2) ** 2
+    return 2 * config.EARTH_R * math.atan2(math.sqrt(x), math.sqrt(1 - x))
 
 def parse_cumulative_dist(text: str, units: str) -> list[float]:
     """Return a list of cumulative distances in *km* no matter what the input units are."""
     vals = [float(x.strip()) for x in text.split(",") if x.strip()]
     if units == "mi":
-        return [v * MILES_TO_KM for v in vals]
+        return [v * config.MILES_TO_KM for v in vals]
     return vals
 
 def parse_gpx(file_bytes, smooth_window=5):
-    g=gpxpy.parse(io.StringIO(file_bytes.decode('utf-8', errors='ignore')))
-    lats,lons,eles,dists=[],[],[],[]; cum=0.0; last=None
-    for t in g.tracks:
-        for s in t.segments:
-            for p in s.points:
-                if last is not None:
-                    d=_haversine_m(last.latitude,last.longitude,p.latitude,p.longitude)
-                    if not (d==d): d=0.0
-                    cum+=d
-                lats.append(p.latitude); lons.append(p.longitude)
-                eles.append(p.elevation if p.elevation is not None else np.nan)
-                dists.append(cum); last=p
-    df=pd.DataFrame({'lat':lats,'lon':lons,'ele_m':eles,'dist_m':dists})
+    gpx_data = gpxpy.parse(io.StringIO(file_bytes.decode('utf-8', errors='ignore')))
+    latitudes, longitudes, elevations, distances = [], [], [], []
+    cumulative_distance = 0.0
+    last_point = None
+    for track in gpx_data.tracks:
+        for segment in track.segments:
+            for point in segment.points:
+                if last_point:
+                    dist = _haversine_m(last_point.latitude, last_point.longitude, point.latitude, point.longitude)
+                    cumulative_distance += dist if not np.isnan(dist) else 0.0
+                latitudes.append(point.latitude)
+                longitudes.append(point.longitude)
+                elevations.append(point.elevation if point.elevation is not None else np.nan)
+                distances.append(cumulative_distance)
+                last_point = point
+    df=pd.DataFrame({'lat':latitudes,'lon':longitudes,'ele_m':elevations,'dist_m':distances})
     df['ele_m']=df['ele_m'].interpolate().bfill().ffill()
     dd=df['dist_m'].diff().fillna(0.0).clip(lower=1e-3); de=df['ele_m'].diff().fillna(0.0)
     gr=(de/dd)*100.0
@@ -120,6 +112,10 @@ def parse_gpx(file_bytes, smooth_window=5):
     return df
 
 def legs_from_aid_stations(df, aid_km):
+    """
+    Given a dataframe with cumulative distances and a list of aid station distances (in km),
+    return a list of (start, end) index tuples for each leg.
+    """
     aid_m=[k*1000.0 for k in aid_km]; idxs=[]; start=0
     for tgt in aid_m:
         end=int(np.searchsorted(df['dist_m'].values, tgt, side='right'))
@@ -188,15 +184,7 @@ def segment_stats(seg_df, resample_step_m: float = 20.0, min_step_m: float = 3.0
     return length_km, float(gain), float(loss), min_ele, max_ele
 
 # --- Map helpers ---
-def _haversine_m_internal(a1, b1, a2, b2):
-    # Reuse the same formula as _haversine_m, but keep a public helper name
-    p1, p2 = math.radians(a1), math.radians(a2)
-    d1 = math.radians(a2 - a1)
-    d2 = math.radians(b2 - b1)
-    x = math.sin(d1 / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(d2 / 2) ** 2
-    return 2 * EARTH_R * math.atan2(math.sqrt(x), math.sqrt(1 - x))
-
-def aid_station_markers(df, aid_km, cluster_radius_m: float = CLUSTER_RADIUS):
+def aid_station_markers(df, aid_km, cluster_radius_m: float = config.CLUSTER_RADIUS):
     """
     From GPX dataframe + cumulative aid station km, return clustered markers:
       [{'lat':..., 'lon':..., 'labels':['AS1','AS4'], 'kms':[10.0,42.2]}, ...]
@@ -216,7 +204,7 @@ def aid_station_markers(df, aid_km, cluster_radius_m: float = CLUSTER_RADIUS):
     for p in pts:
         placed = False
         for c in clusters:
-            d = _haversine_m_internal(p['lat'], p['lon'], c['lat'], c['lon'])
+            d = _haversine_m(p['lat'], p['lon'], c['lat'], c['lon'])
             if d <= cluster_radius_m:
                 c['labels'].append(p['label'])
                 c['kms'].append(p['km'])
@@ -226,7 +214,7 @@ def aid_station_markers(df, aid_km, cluster_radius_m: float = CLUSTER_RADIUS):
             clusters.append({'lat': p['lat'], 'lon': p['lon'], 'labels': [p['label']], 'kms': [p['km']]})
     return clusters
 
-def resample_by_distance(df, step_m: float = STEP_LENGTH):
+def resample_by_distance(df, step_m: float = config.STEP_LENGTH):
     d = df["dist_m"].to_numpy(dtype=float)
     e = df["ele_m"].to_numpy(dtype=float)
     if len(d) < 2:
@@ -237,7 +225,7 @@ def resample_by_distance(df, step_m: float = STEP_LENGTH):
     out = pd.DataFrame({"dist_m": grid, "ele_m": e_i})
     return out
 
-def add_grade_over_window(df, window_m: float = STEP_WINDOW, step_m: float = STEP_LENGTH):
+def add_grade_over_window(df, window_m: float = config.STEP_WINDOW, step_m: float = config.STEP_LENGTH):
     """
     Smooth elevation over ~window_m and compute grade (%) with np.gradient.
     This returns a grade array with the SAME length as df (fixing the off-by-one).
@@ -260,7 +248,7 @@ def add_grade_over_window(df, window_m: float = STEP_WINDOW, step_m: float = STE
     out["grade_pct"] = grade
     return out
 
-def resample_with_grade(df, step_m: float = STEP_LENGTH, window_m: float = STEP_WINDOW):
+def resample_with_grade(df, step_m: float = config.STEP_LENGTH, window_m: float = config.STEP_WINDOW):
     df2 = resample_by_distance(df, step_m=step_m)
     return add_grade_over_window(df2, window_m=window_m, step_m=step_m)
 
@@ -275,15 +263,15 @@ def apply_ultra_adjustments_progressive(p10, p50, p90, leg_ends_x):
     """
 
     T50 = float(p50[-1])
-    hours = T50 / SECONDS_PER_HOUR
+    hours = T50 / config.SECONDS_PER_HOUR
 
     p10 = p10.copy(); p50 = p50.copy(); p90 = p90.copy()
 
-    if hours <= START_TH_H:
+    if hours <= config.START_TH_H:
         meta = dict(
-            start_threshold_h=START_TH_H,
-            ultra_gamma=ULTRA_GAMMA,
-            rest_per_24h_h=REST_PER_24H,
+            start_threshold_h=config.START_TH_H,
+            ultra_gamma=config.ULTRA_GAMMA,
+            rest_per_24h_h=config.REST_PER_24H,
             slow_factor_finish=1.0,
             rest_added_finish_s=0.0,
         )
@@ -295,10 +283,10 @@ def apply_ultra_adjustments_progressive(p10, p50, p90, leg_ends_x):
     for i, x in enumerate(leg_ends_x):
         # x is fraction of total distance at this checkpoint (0..1)
         h_here = hours * float(x)
-        blocks = max(0.0, (h_here - START_TH_H) / 24.0)
+        blocks = max(0.0, (h_here - config.START_TH_H) / 24.0)
 
-        slow_i = 1.0 + ULTRA_GAMMA * blocks
-        rest_s = (REST_PER_24H * SECONDS_PER_HOUR) * blocks
+        slow_i = 1.0 + config.ULTRA_GAMMA * blocks
+        rest_s = (config.REST_PER_24H * config.SECONDS_PER_HOUR) * blocks
 
         p10[i] = p10[i] * slow_i + 0.25 * rest_s
         p50[i] = p50[i] * slow_i + 0.50 * rest_s
@@ -312,15 +300,15 @@ def apply_ultra_adjustments_progressive(p10, p50, p90, leg_ends_x):
         p90 = p90 * skew
 
     meta = dict(
-        start_threshold_h=START_TH_H,
-        ultra_gamma=ULTRA_GAMMA,
-        rest_per_24h_h=REST_PER_24H,
+        start_threshold_h=config.START_TH_H,
+        ultra_gamma=config.ULTRA_GAMMA,
+        rest_per_24h_h=config.REST_PER_24H,
         slow_factor_finish=float(slow_finish),
         rest_added_finish_s=float(rest_finish_s),
     )
     return p10, p50, p90, meta
 
-def altitude_impairment_multiplicative(H_m: float, alpha: float = ALPHA, h0: float = H0) -> float:
+def altitude_impairment_multiplicative(H_m: float, alpha: float = config.ALPHA, h0: float = config.H0) -> float:
     """
     Multiplicative speed factor in [0.6, 1.0].
     1.0 at/below 300 m; minus ~6% per 1000 m above 300 m (clipped at 40% total).
@@ -338,15 +326,15 @@ def recency_weight(start_date_str: str, mode: str = "mild") -> float:
     """
     Weighted by recency:
       - "off": 1.0
-      - "mild": half-life ~18 months
-      - "medium": half-life ~9 months
+      - "mild": half-life as defined by MILD_HALF_LIVE
+      - "medium": half-life 0.5 * "mild"
     """
     if mode == "off":
         return 1.0
     now = datetime.now(timezone.utc)
     dt = parse_iso8601_utc(start_date_str)
-    months = max(0.0, (now - dt).days / MONTH_LENGTH)
-    half_life = MILD_HALF_LIFE if mode == "mild" else MILD_HALF_LIFE/2
+    months = max(0.0, (now - dt).days / config.MONTH_LENGTH)
+    half_life = config.MILD_HALF_LIFE if mode == "mild" else config.MILD_HALF_LIFE/2
     lam = np.log(2) / half_life  # per month
     return float(np.exp(-lam * months))
 
@@ -366,7 +354,7 @@ def build_pace_curves_from_races(
     access_token: str,
     activities: List[Dict[str, Any]],
     bins: list,
-    max_activities: int = 200,
+    max_activities: int = config.MAX_ACTIVITIES,
     recency_mode: str = "mild",   # "off" | "mild" | "medium"
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
     """
@@ -464,7 +452,7 @@ def build_pace_curves_from_races(
                 continue
             b = int(bin_idx[i])
             # Sea-level normalized speed
-            s_sl = float(np.clip(vel[i] / max(A_r, 1e-6), 0.1, 6.0))
+            s_sl = float(np.clip(vel[i] / max(A_r, config.EPSILON), config.SEA_LEVEL_CLIP_LOW, config.SEA_LEVEL_CLIP_HIGH))
             spd_bins[b].append(s_sl)
             w_bins[b].append(float(dd[i] * w_r))
             used_any = True
@@ -495,22 +483,22 @@ def build_pace_curves_from_races(
         x = np.array(spd_bins[i], dtype=float)
         w = np.array(w_bins[i], dtype=float)
         if len(x) == 0 or np.sum(w) == 0:
-            rows.append(dict(lower_pct=bins[i], upper_pct=bins[i+1], speed_mps=1.2, sigma_rel=0.10))
+            rows.append(dict(lower_pct=bins[i], upper_pct=bins[i+1], speed_mps=1.2, sigma_rel=config.SIGMA_REL_DEFAULT))
         else:
             med = weighted_percentile(x, w, 50)
             q10 = weighted_percentile(x, w, 10)
             q90 = weighted_percentile(x, w, 90)
-            rel = (q90 - q10) / max(1e-6, 2 * med)
+            rel = (q90 - q10) / max(config.EPSILON, 2 * med)
             rows.append(dict(
                 lower_pct=bins[i],
                 upper_pct=bins[i+1],
                 speed_mps=float(med),          # SEA-LEVEL speed
-                sigma_rel=float(np.clip(rel, 0.05, 0.20))
+                sigma_rel=float(np.clip(rel, config.SIGMA_REL_LOW, config.SIGMA_REL_HIGH))
             ))
     curves = pd.DataFrame(rows)
 
     # --- Fit personal Riegel exponent k (log T ~ a + k log D) with recency weights ---
-    k = DEFAULT_RIEGEL_K  # default if insufficient data
+    k = config.DEFAULT_RIEGEL_K  # default if insufficient data
     ref_distance_km = None
     ref_time_s = None
     if not used_df.empty:
@@ -540,7 +528,7 @@ def build_pace_curves_from_races(
             ref_time_s = float(t_sorted[min(idx, len(t_sorted)-1)])
 
     meta = dict(
-        alpha=ALPHA,
+        alpha=config.ALPHA,
         recency_mode=recency_mode,
         riegel_k=float(k),
         ref_distance_km=float(ref_distance_km) if ref_distance_km else None,

@@ -1,30 +1,28 @@
-import os, json
+import os
+import json
 import streamlit as st
 from pathlib import Path
-import pandas as pd, numpy as np
+import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import folium
 from streamlit_folium import st_folium
 import hashlib
-from utils.gpx_utils import parse_gpx, legs_from_aid_stations, compute_course_context, course_fingerprint, distance_by_grade_bins, segment_stats, aid_station_markers, resample_with_grade, apply_ultra_adjustments_progressive, parse_cumulative_dist, build_pace_curves_from_races, altitude_impairment_multiplicative
+
+# Local imports
+from utils.gpx_utils import (
+    compute_course_context, course_fingerprint, segment_stats,
+    aid_station_markers, parse_cumulative_dist, build_pace_curves_from_races,
+    altitude_impairment_multiplicative, apply_ultra_adjustments_progressive
+)
 from model.predictor import simulate_etas
 from utils.strava_utils import build_auth_url, exchange_code_for_token, ensure_token, list_activities
 from utils.app_utils import load_saved_app_creds, save_app_creds, forget_app_creds, fmt
+import config
 
-# CONSTANTS
-DATA_DIR = "data"
-APP_CREDS_PATH = Path(DATA_DIR) / "strava_app.json"
-GRADE_BINS = [-100, -30, -20, -12, -8, -5, -3, 0, 3, 5, 8, 12, 20, 30, 100] # used to calculate average speed by grade
-MC_SIMS = 1000  # fixed Monte Carlo runs
-DEFAULT_RIEGEL_K =  1.06 # coefficient to account for slowdown over longer distances. Default value is common for road running.
-STEP_LENGTH = 10.0 # length of minimum segment for which we'll calculate the grade (in m)
-STEP_WINDOW = 40.0 # size of sliding window (in m) used to smooth out gpx data
-MAX_ACTIVITIES = 200 # upper limit for how much activities to load from strava (due to API restrictions)
-CLUSTER_RADIUS = 200.0 # aid stations within this radius (in m) will be merged on the map
-EPSILON = 1e-6
+# --- Helper Functions ---
 
-# METHODS
-def get_course_context(aid_km_text: str, aid_units: str, grade_bins: list[float]):
+def get_course_context(aid_km_text: str, aid_units: str):
     """Cache the computed course context in st.session_state."""
     gpx_bytes = st.session_state.get("gpx_bytes")
     if not gpx_bytes:
@@ -32,26 +30,103 @@ def get_course_context(aid_km_text: str, aid_units: str, grade_bins: list[float]
         st.session_state.pop("course_ctx_fp", None)
         return None
 
-    fp = course_fingerprint(gpx_bytes, aid_km_text, aid_units, grade_bins, STEP_LENGTH, STEP_WINDOW)
+    fp = course_fingerprint(
+        gpx_bytes, aid_km_text, aid_units, config.GRADE_BINS,
+        config.STEP_LENGTH, config.STEP_WINDOW
+    )
     if st.session_state.get("course_ctx_fp") != fp:
         ctx = compute_course_context(
-            gpx_bytes, aid_km_text, aid_units, grade_bins,
-            step_length=STEP_LENGTH, step_window=STEP_WINDOW
+            gpx_bytes, aid_km_text, aid_units, config.GRADE_BINS,
+            step_length=config.STEP_LENGTH, step_window=config.STEP_WINDOW
         )
         st.session_state["course_ctx"] = ctx
         st.session_state["course_ctx_fp"] = fp
     return st.session_state.get("course_ctx")
 
-# UI
+def display_course_map(ctx):
+    """Renders the Folium map with the GPX route and aid stations."""
+    try:
+        df_map = ctx["df_raw"]
+        length_km, gain_m, loss_m, min_ele, max_ele = ctx["course_stats"]
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Course length", f"{length_km:.1f} km")
+        c2.metric("Total gain", f"{gain_m:.0f} m")
+        c3.metric("Total loss", f"{loss_m:.0f} m")
+        st.caption(f"Elevation range: {min_ele:.0f}–{max_ele:.0f} m")
+
+        m = folium.Map(tiles="OpenStreetMap")
+        route = list(zip(df_map['lat'].astype(float), df_map['lon'].astype(float)))
+        if len(route) >= 2:
+            folium.PolyLine(route, weight=3, opacity=0.9).add_to(m)
+            min_lat, max_lat = float(df_map['lat'].min()), float(df_map['lat'].max())
+            min_lon, max_lon = float(df_map['lon'].min()), float(df_map['lon'].max())
+            m.fit_bounds([[min_lat, min_lon], [max_lat, max_lon]])
+
+        clusters = aid_station_markers(df_map, ctx["aid_km"], cluster_radius_m=config.CLUSTER_RADIUS)
+        for c in clusters:
+            label = "/".join(c['labels'])
+            km_list = ", ".join(f"{k:.1f} km" for k in sorted(c['kms']))
+            folium.Marker(
+                location=[c['lat'], c['lon']],
+                tooltip=label,
+                popup=folium.Popup(html=f"<b>{label}</b><br/>{km_list}", max_width=250)
+            ).add_to(m)
+        st_folium(m, width=None, height=500)
+    except Exception as e:
+        st.warning(f"Could not render map: {e}")
+
+def display_segments_overview(ctx):
+    """Displays the segment-by-segment breakdown of the course."""
+    try:
+        df = ctx["df_res"]
+        legs_idx = ctx["legs_idx"]
+        names_list = [f"AS{i + 1}" for i in range(len(legs_idx) - 1)] + ["Finish"]
+
+        seg_rows = []
+        for i, (a, b) in enumerate(legs_idx):
+            seg = df.iloc[a:b + 1]
+            length_km, gain_m, loss_m, min_ele, max_ele = segment_stats(seg)
+            start_name = "Start" if i == 0 else names_list[i - 1]
+            end_name = names_list[i]
+            title = f"{start_name} → {end_name}"
+            with st.expander(f"{title}  •  {length_km:.1f} km  •  +{int(gain_m)}m / -{int(loss_m)}m"):
+                st.write(pd.DataFrame({
+                    "Metric": ["Length (km)", "Elevation gain (m)", "Elevation loss (m)", "Min elev (m)",
+                               "Max elev (m)"],
+                    "Value": [round(length_km, 1), int(gain_m), int(loss_m), int(min_ele), int(max_ele)]
+                }))
+                x_km = (seg['dist_m'] - seg['dist_m'].iloc[0]) / 1000.0
+                y_m = seg['ele_m']
+                fig, ax = plt.subplots(figsize=(5, 2))
+                ax.plot(x_km, y_m)
+                ax.set_xlabel("Distance (km)")
+                ax.set_ylabel("Elevation (m)")
+                ax.set_title(title)
+                st.pyplot(fig)
+                plt.close(fig)  # explicitly close the figure after Streamlit has copied it
+            seg_rows.append({
+                "Segment": title, "Km": round(length_km, 1), "Gain_m": int(gain_m),
+                "Loss_m": int(loss_m), "Min_ele_m": int(min_ele), "Max_ele_m": int(max_ele)
+            })
+        if seg_rows:
+            seg_df = pd.DataFrame(seg_rows)
+            st.dataframe(seg_df, use_container_width=True)
+            st.download_button("Download segments CSV", seg_df.to_csv(index=False).encode(),
+                               "segments_overview.csv", "text/csv")
+    except Exception as e:
+        st.warning(f"Could not render segments overview: {e}")
+
+# Main app
 st.set_page_config(page_title="Race Time Predictor", layout="wide")
 st.title("🏃‍♂️ Race Time Predictor")
 tab_race, tab_data = st.tabs(["🏁 Upcoming race", "📚 My data"])
 
-# load pace curves and past races if data was already saved (to reduce number of API calls)
-if 'pace_df' not in st.session_state and os.path.exists("data/pace_curves.csv"):
-    st.session_state['pace_df'] = pd.read_csv("data/pace_curves.csv")
-if 'used_races' not in st.session_state and os.path.exists("data/used_races.csv"):
-    st.session_state['used_races'] = pd.read_csv("data/used_races.csv")
+# Load cached data
+if 'pace_df' not in st.session_state and os.path.exists(config.PACE_CURVES_PATH):
+    st.session_state['pace_df'] = pd.read_csv(config.PACE_CURVES_PATH)
+if 'used_races' not in st.session_state and os.path.exists(config.USED_RACES_PATH):
+    st.session_state['used_races'] = pd.read_csv(config.USED_RACES_PATH)
 pc = st.session_state.get('pace_df')
 
 with st.sidebar:
@@ -59,7 +134,7 @@ with st.sidebar:
     st.caption("Create a Strava API app → set Authorization Callback Domain to **localhost**.")
 
     # 1) Prefill from saved creds → env vars → session (so you rarely retype)
-    saved = load_saved_app_creds(APP_CREDS_PATH)
+    saved = load_saved_app_creds(config.APP_CREDS_PATH)
     default_id = saved.get("client_id") or os.environ.get("STRAVA_CLIENT_ID", "")
     default_secret = saved.get("client_secret") or os.environ.get("STRAVA_CLIENT_SECRET", "")
 
@@ -73,7 +148,7 @@ with st.sidebar:
         code = qs["code"]
         try:
             exchange_code_for_token(client_id, client_secret, code)
-            save_app_creds(client_id, client_secret, DATA_DIR, APP_CREDS_PATH)  # save on first successful connect
+            save_app_creds(client_id, client_secret, config.DATA_DIR, config.APP_CREDS_PATH)  # save on first successful connect
             st.success("Strava connected ✅")
             st.query_params.clear()
         except Exception as e:
@@ -94,7 +169,7 @@ with st.sidebar:
 
     with colB:
         if st.button("Save app creds", use_container_width=True, disabled=not (client_id and client_secret)):
-            save_app_creds(client_id, client_secret, DATA_DIR, APP_CREDS_PATH)
+            save_app_creds(client_id, client_secret, config.DATA_DIR, config.APP_CREDS_PATH)
             st.success("Saved locally")
 
     with colC:
@@ -127,7 +202,7 @@ with st.sidebar:
     aid_units = st.radio("Aid station units", options=["km", "mi"], index=0, horizontal=True)
 
     # Build/refresh course context AFTER inputs exist
-    ctx = get_course_context(aid_km_text, aid_units, GRADE_BINS)
+    ctx = get_course_context(aid_km_text, aid_units)
     st.caption("All outputs are in metric (km). This only affects the input parsing.")
 
     # Allow user to add some simple race day conditions - form, weather, and how much weight to put on more recent races
@@ -151,7 +226,7 @@ with st.sidebar:
 if build_btn and tokens:
     try:
         acts = list_activities(tokens["access_token"], per_page=200)
-        pace_df, used_df, meta = build_pace_curves_from_races(tokens["access_token"], acts, GRADE_BINS, max_activities=MAX_ACTIVITIES, recency_mode=recency_mode)
+        pace_df, used_df, meta = build_pace_curves_from_races(tokens["access_token"], acts, config.GRADE_BINS, max_activities=config.MAX_ACTIVITIES, recency_mode=recency_mode)
         # to share variables between reruns, assign them to session states
         st.session_state['pace_df'] = pace_df
         st.session_state['used_races'] = used_df
@@ -170,104 +245,17 @@ if build_btn and tokens:
 
 with tab_race:
     st.subheader("Course map (GPX + aid stations)")
-
     if not ctx:
         st.info("Upload a GPX to view the route map.")
     else:
-        try:
-            df_map = ctx["df_raw"]  # original coords for drawing the line
-            df_res = ctx["df_res"]  # resampled (for totals)
-            length_km, gain_m, loss_m, min_ele, max_ele = ctx["course_stats"]
+        display_course_map(ctx)
 
-            # Totals above the map
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Course length", f"{length_km:.1f} km")
-            c2.metric("Total gain", f"{gain_m:.0f} m")
-            c3.metric("Total loss", f"{loss_m:.0f} m")
-            st.caption(f"Elevation range: {min_ele:.0f}–{max_ele:.0f} m")
-
-            # Parse the aid-station list
-            try:
-                aid_km_list = parse_cumulative_dist(aid_km_text, aid_units)  # if you added the units toggle
-            except NameError:
-                aid_km_list = [float(x.strip()) for x in aid_km_text.split(",") if x.strip()]
-
-            # Build the base map and fit to route bounds
-            m = folium.Map(tiles="OpenStreetMap")
-            route = list(zip(df_map['lat'].astype(float), df_map['lon'].astype(float)))
-            if len(route) >= 2:
-                folium.PolyLine(route, weight=3, opacity=0.9).add_to(m)
-                min_lat, max_lat = float(df_map['lat'].min()), float(df_map['lat'].max())
-                min_lon, max_lon = float(df_map['lon'].min()), float(df_map['lon'].max())
-                m.fit_bounds([[min_lat, min_lon], [max_lat, max_lon]])
-
-            # Add clustered aid-station markers (handles repeats like AS1/AS4 at same place)
-            clusters = aid_station_markers(df_map, aid_km_list, cluster_radius_m=CLUSTER_RADIUS)
-            for c in clusters:
-                label = "/".join(c['labels'])
-                km_list = ", ".join(f"{k:.1f} km" for k in sorted(c['kms']))
-                folium.Marker(
-                    location=[c['lat'], c['lon']],
-                    tooltip=label,
-                    popup=folium.Popup(html=f"<b>{label}</b><br/>{km_list}", max_width=250)
-                ).add_to(m)
-
-            # Render in Streamlit (display the map)
-            st_folium(m, width=None, height=500)
-
-        except Exception as e:
-            st.warning(f"Could not render map: {e}")
-
-    # Segments overview
     st.divider()
     st.subheader("Segments overview")
-    #ctx = get_course_context(st.session_state.get("gpx_bytes"), aid_km_text, aid_units, GRADE_BINS)
     if not ctx:
         st.info("Upload a GPX to see segment breakdown.")
     else:
-        try:
-            df = ctx["df_res"]
-            legs_idx = ctx["legs_idx"]
-            # names: Start -> AS1, AS1 -> AS2, ..., last -> Finish
-            names_list = [f"AS{i + 1}" for i in range(len(legs_idx) - 1)] + ["Finish"]
-
-            seg_rows = []
-            for i, (a, b) in enumerate(legs_idx):
-                seg = df.iloc[a:b + 1]
-                length_km, gain_m, loss_m, min_ele, max_ele = segment_stats(seg)
-                start_name = "Start" if i == 0 else names_list[i - 1] if i - 1 < len(names_list) else f"AS{i}"
-                end_name = names_list[i] if i < len(names_list) else f"AS{i + 1}"
-                title = f"{start_name} → {end_name}"
-                with st.expander(f"{title}  •  {length_km:.1f} km  •  +{int(gain_m)}m / -{int(loss_m)}m"):
-                    st.write(pd.DataFrame({
-                        "Metric": ["Length (km)", "Elevation gain (m)", "Elevation loss (m)", "Min elev (m)",
-                                   "Max elev (m)"],
-                        "Value": [round(length_km, 1), int(gain_m), int(loss_m), int(min_ele), int(max_ele)]
-                    }))
-                    x_km = (seg['dist_m'] - seg['dist_m'].iloc[0]) / 1000.0
-                    y_m = seg['ele_m']
-                    fig, ax = plt.subplots(figsize=(5, 2))
-                    ax.plot(x_km, y_m)
-                    ax.set_xlabel("Distance (km)")
-                    ax.set_ylabel("Elevation (m)")
-                    ax.set_title(title)
-                    st.pyplot(fig)
-                    plt.close(fig)  # explicitly close the figure after Streamlit has copied it
-                seg_rows.append({
-                    "Segment": title,
-                    "Km": round(length_km, 1),
-                    "Gain_m": int(gain_m),
-                    "Loss_m": int(loss_m),
-                    "Min_ele_m": int(min_ele),
-                    "Max_ele_m": int(max_ele)
-                })
-            if seg_rows:
-                seg_df = pd.DataFrame(seg_rows)
-                st.dataframe(seg_df, use_container_width=True)
-                st.download_button("Download segments CSV", seg_df.to_csv(index=False).encode(),
-                                   "segments_overview.csv", "text/csv")
-        except Exception as e:
-            st.warning(f"Could not render segments overview: {e}")
+        display_segments_overview(ctx)
 
     st.divider()
     st.subheader("Predict ETAs")
@@ -277,13 +265,13 @@ with tab_race:
     if predict_btn and gpx_file is not None and pc is not None:
         try:
             # 1) sanity on pace curves vs bins
-            if len(pc) != len(GRADE_BINS) - 1:
-                st.error(f"Pace curves bins ({len(pc)}) do not match expected ({len(GRADE_BINS) - 1}). "
+            num_bins = len(config.GRADE_BINS)
+            if len(pc) != num_bins - 1:
+                st.error(f"Pace curves bins ({len(pc)}) do not match expected ({num_bins - 1}). "
                          f"Try rebuilding curves from Strava.")
                 raise RuntimeError("pace_df/bin mismatch")
 
             # 2) build legs by GPX indices
-            #ctx = get_course_context(st.session_state.get("gpx_bytes"), aid_km_text, aid_units, GRADE_BINS)
             if not ctx or len(ctx["legs_meters"]) == 0:
                 st.error("Could not derive segments from GPX + aid-station list.")
             else:
@@ -303,7 +291,7 @@ with tab_race:
             speeds = speeds_sl * A_course
 
             # 5) Use deterministic seed so identical inputs => identical ETAs
-            seed_payload = str([GRADE_BINS,
+            seed_payload = str([config.GRADE_BINS,
                                 list(np.round(speeds, 5)),
                                 list(np.round(sigmas, 5)),
                                 heat, feel,
@@ -313,11 +301,11 @@ with tab_race:
             np.random.seed(seed)
 
             # 6) run sim (assumes simulate_etas returns P10/P50/P90)
-            p10, p50, p90 = simulate_etas(legs_meters, speeds, sigmas, leg_ends_x, heat, feel, sims=MC_SIMS)
+            p10, p50, p90 = simulate_etas(legs_meters, speeds, sigmas, leg_ends_x, heat, feel, sims=config.MC_SIMS)
 
             # 7) Stamina scaling via personal Riegel exponent k ---
             meta = st.session_state.get('model_meta') or {}
-            k = float(meta.get('riegel_k', DEFAULT_RIEGEL_K))
+            k = float(meta.get('riegel_k', config.DEFAULT_RIEGEL_K))
             Dref = meta.get('ref_distance_km', None)
             Tref = meta.get('ref_time_s', None)
 
@@ -329,7 +317,7 @@ with tab_race:
             if Dref and Tref and total_km > 0:
                 T_base50 = float(p50[-1])
                 T_riegel = float(Tref) * (total_km / float(Dref)) ** float(k)
-                s = float(T_riegel / max(EPSILON, T_base50))
+                s = float(T_riegel / max(config.EPSILON, T_base50))
                 # only use Riegel factor to slow down longer efforts, not speed up short races
                 if s > 1.0:
                     p10, p50, p90 = p10 * s, p50 * s, p90 * s
@@ -391,7 +379,6 @@ with tab_race:
     else:
         st.info("No ETAs yet — click Run prediction.")
 
-
     meta = st.session_state.get("prediction_meta")
     if meta:
         # Friendly text for reference race
@@ -443,7 +430,7 @@ with tab_data:
     st.subheader("Derived pace curves (by grade bin)")
     if pc is not None:
         show = pc.copy().rename(columns={"speed_mps": "Average speed (in m/s)"})
-        show.insert(0, "Grade bin", [f"{GRADE_BINS[i]}..{GRADE_BINS[i+1]}%" for i in range(len(GRADE_BINS)-1)])
+        show.insert(0, "Grade bin", [f"{config.GRADE_BINS[i]}..{config.GRADE_BINS[i+1]}%" for i in range(len(config.GRADE_BINS)-1)])
         st.dataframe(show[["Grade bin","Average speed (in m/s)","sigma_rel"]], use_container_width=True)
     else:
         st.info("No pace curves yet.")
