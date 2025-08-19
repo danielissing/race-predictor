@@ -22,11 +22,16 @@ STEP_WINDOW = 40.0
 MAX_ACTIVITIES = 200
 CLUSTER_RADIUS = 200.0
 EPSILON = 1e-6
+HEAT_MULT={'cool':1.00,'moderate':1.02,'hot':1.05}
+FEEL_MULT={'good':0.98,'ok':1.00,'meh':1.02}
+SIGMA_DAY = 0.035
+RHO = 0.4
+SLEEP_CUTOFF = 12.0
 
 # --- GPX & Ultra Adjustment Parameters ---
 EARTH_R = 6371000.0
-ALPHA = 0.06
-H0 = 300.0
+ELEVATION_IMPAIRMENT = 0.06 # % penalty for high elevation races
+ELEVATION_IMPAIRMENT_THRESHOLD = 300.0 # elevation from which on elevation penalty is applied
 MONTH_LENGTH = 30.437
 REST_PER_24H = 2.0
 ULTRA_GAMMA = 0.30
@@ -40,3 +45,4 @@ SEA_LEVEL_CLIP_HIGH = 6.0
 SIGMA_REL_LOW = 0.05
 SIGMA_REL_HIGH = 1.0
 SIGMA_REL_DEFAULT = 0.1
+DEFAULT_SMOOTH_WINDOW = 5
