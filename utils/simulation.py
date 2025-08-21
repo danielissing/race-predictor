@@ -8,7 +8,7 @@ from utils.performance import fatigue_multiplier
 import config
 
 
-def simulate_etas(
+def simulate_confidence_intervals(
         legs_meters: np.ndarray,
         speeds_mps: np.ndarray,
         sigmas_rel: np.ndarray,
@@ -41,7 +41,7 @@ def simulate_etas(
         rho: Correlation between grade bins (0 to 1)
 
     Returns:
-        Tuple of (p10, p50, p90) - 10th, 50th, 90th percentile times for each checkpoint
+        Tuple of (p10, p90) - 10th and 90th percentile times for each checkpoint
 
     Simulation Process:
     1. Each simulation draws a "day factor" (good day vs bad day)
@@ -97,7 +97,6 @@ def simulate_etas(
 
     # Extract percentiles from all simulations
     p10 = np.percentile(samples, 10, axis=0)
-    p50 = np.percentile(samples, 50, axis=0)
     p90 = np.percentile(samples, 90, axis=0)
 
-    return p10, p50, p90
+    return p10, p90

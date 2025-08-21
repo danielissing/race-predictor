@@ -14,7 +14,7 @@ CACHE_DIR = f"{DATA_DIR}/strava_cache"
 DEFAULT_TIMEOUT = 30
 
 # --- Model & Course Parameters ---
-GRADE_BINS = [-100, -30, -20, -12, -8, -5, -3, 0, 3, 5, 8, 12, 20, 30, 100]
+GRADE_BINS = [-50, -30, -20, -12, -8, -5, -3, 0, 3, 5, 8, 12, 20, 30, 50]
 MC_SIMS = 1000
 DEFAULT_RIEGEL_K = 1.06
 STEP_LENGTH = 10.0

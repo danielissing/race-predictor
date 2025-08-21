@@ -14,12 +14,14 @@ Usage:
 """
 
 import os
+import sys
 import json
 import hashlib
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 from typing import Dict, List, Optional, Tuple
+
+# Add parent directory to path so we can import from utils/
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import typer
 import pandas as pd
@@ -30,7 +32,7 @@ from rich.progress import track
 from rich.table import Table
 
 # Import from newly refactored modules
-from utils.strava import ensure_token, list_activities, get_activity_streams, is_run, is_race
+from utils.strava_utils import ensure_token, list_activities, get_activity_streams, is_run, is_race
 from utils.pace_builder import build_pace_curves_from_races
 from utils.gpx_parsing import parse_gpx
 from utils.elevation import resample_with_grade, segment_stats
@@ -38,7 +40,8 @@ from utils.course_analysis import legs_from_aid_stations, distance_by_grade_bins
 from utils.performance import altitude_impairment_multiplicative, apply_ultra_adjustments_progressive
 from utils.simulation import simulate_etas
 from utils.prediction import run_prediction_simulation
-from utils.persistence import load_saved_app_creds, fmt
+from utils.app_utils import load_saved_app_creds
+from utils.display import format_seconds
 from models import Course, PaceModel
 import config
 
@@ -186,19 +189,15 @@ def validate_single_race(
         if not gpx_bytes:
             return None
 
-        # 3. Create course with uniform checkpoints
-        race_distance_km = race.get('distance', 0) / 1000.0
-        checkpoint_km = create_uniform_checkpoints(race_distance_km, checkpoint_interval_km)
+        # 3. Create course - for validation, we don't use aid stations
+        # This matches what happens when you test a race in the app without aid stations
+        course = Course(gpx_bytes, aid_km_text="", aid_units="km")
 
-        # Convert to aid station string for Course constructor
-        aid_km_text = ", ".join(str(km) for km in checkpoint_km[:-1])  # Exclude finish
-
-        course = Course(gpx_bytes, aid_km_text, "km")
-
-        # 4. Run prediction (matching app.py logic exactly)
+        # 4. Run prediction using the EXACT same logic as app.py
+        # Use neutral conditions for fair comparison
         prediction_results = run_prediction_simulation(
             course, pace_model,
-            feel="ok", heat="moderate"  # Neutral conditions for validation
+            feel="ok", heat="moderate"
         )
 
         p10 = prediction_results["p10"]
@@ -206,29 +205,43 @@ def validate_single_race(
         p90 = prediction_results["p90"]
         metadata = prediction_results["metadata"]
 
-        # 5. Get actual race times at checkpoints
+        # 5. For checkpoint validation, create uniform checkpoints
+        race_distance_km = race.get('distance', 0) / 1000.0
+        checkpoint_km = create_uniform_checkpoints(race_distance_km, checkpoint_interval_km)
         actual_times = extract_actual_splits(streams, checkpoint_km)
-
-        if len(actual_times) == 0:
-            return None
 
         # 6. Calculate validation metrics
         finish_actual_s = race['elapsed_time']
-        finish_pred_s = float(p50[-1])
+        finish_pred_s = float(p50[-1]) if len(p50) > 0 else 0
+
+        # Debug output for Riegel issues
+        console.print(f"[dim]Race: {race['name'][:30]} | Distance: {race_distance_km:.1f}km[/dim]")
+        console.print(f"[dim]Riegel k: {metadata.get('riegel_k', 'N/A'):.3f} | "
+                      f"Riegel applied: {metadata.get('riegel_applied', False)} | "
+                      f"Scale: {metadata.get('riegel_scale_factor', 1.0):.3f}[/dim]")
+
+        if finish_actual_s <= 0:
+            return None
+
         finish_error_s = finish_pred_s - finish_actual_s
         finish_error_pct = (finish_error_s / finish_actual_s) * 100
 
-        # Calculate errors at all checkpoints
+        # Calculate checkpoint errors if we have matching data
         checkpoint_errors_pct = []
-        for i, (pred, actual) in enumerate(zip(p50, actual_times)):
-            if actual > 0:
-                error_pct = abs((pred - actual) / actual) * 100
-                checkpoint_errors_pct.append(error_pct)
+        if len(actual_times) > 0 and len(p50) > 0:
+            # Interpolate predictions at checkpoint distances
+            pred_times = np.interp(checkpoint_km, course.leg_end_km, p50)
+            for pred, actual in zip(pred_times, actual_times):
+                if actual > 0:
+                    error_pct = abs((pred - actual) / actual) * 100
+                    checkpoint_errors_pct.append(error_pct)
 
         median_checkpoint_error = np.median(checkpoint_errors_pct) if checkpoint_errors_pct else 0
 
         # Check if actual finish was within P10-P90 range
-        within_confidence = (p10[-1] <= finish_actual_s <= p90[-1])
+        within_confidence = False
+        if len(p10) > 0 and len(p90) > 0:
+            within_confidence = (p10[-1] <= finish_actual_s <= p90[-1])
 
         return {
             "race_id": race['id'],
@@ -236,9 +249,9 @@ def validate_single_race(
             "race_date": race['start_date'][:10],
             "distance_km": round(race_distance_km, 1),
             "actual_time_s": finish_actual_s,
-            "predicted_p10_s": float(p10[-1]),
+            "predicted_p10_s": float(p10[-1]) if len(p10) > 0 else 0,
             "predicted_p50_s": finish_pred_s,
-            "predicted_p90_s": float(p90[-1]),
+            "predicted_p90_s": float(p90[-1]) if len(p90) > 0 else 0,
             "error_s": finish_error_s,
             "error_pct": finish_error_pct,
             "abs_error_pct": abs(finish_error_pct),
@@ -246,12 +259,17 @@ def validate_single_race(
             "within_confidence": within_confidence,
             "n_historical_races": len(historical_races),
             "altitude_factor": metadata.get("alt_speed_factor", 1.0),
+            "riegel_k": metadata.get("riegel_k", 1.06),
             "riegel_scale": metadata.get("riegel_scale_factor", 1.0),
-            "ultra_adjustments_applied": metadata.get("slow_factor_finish", 1.0) > 1.0
+            "riegel_applied": metadata.get("riegel_applied", False),
+            "ultra_adjustments_applied": metadata.get("slow_factor_finish", 1.0) > 1.0,
+            "course_median_alt_m": metadata.get("course_median_alt_m", 0)
         }
 
     except Exception as e:
         console.print(f"[yellow]Warning: Failed to validate {race['name']}: {e}[/yellow]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
         return None
 
 
@@ -448,7 +466,7 @@ def validate(
 
     summary_table.add_row("Races Validated", str(len(results_df)))
     summary_table.add_row("Races Skipped", str(skipped))
-    summary_table.add_row("Mean Absolute Error", fmt(mae_seconds))
+    summary_table.add_row("Mean Absolute Error", format_seconds(mae_seconds))
     summary_table.add_row("Mean Absolute % Error", f"{mape:.1f}%")
     summary_table.add_row("Mean Bias", f"{bias:+.1f}%")
     summary_table.add_row("Median Checkpoint Error", f"{median_checkpoint_error:.1f}%")
@@ -538,4 +556,9 @@ def quick_test():
 
 
 if __name__ == "__main__":
+    # Make 'validate' the default command when no command is specified
+    import sys
+
+    if len(sys.argv) == 1:
+        sys.argv.append("validate")
     app()

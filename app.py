@@ -4,12 +4,12 @@ import hashlib
 
 # Local imports
 from utils.strava import build_auth_url, exchange_code_for_token, ensure_token, list_activities
-from utils.persistence import load_saved_app_creds, save_app_creds, forget_app_creds, fmt, load_pace_model_from_disk, save_pace_model_to_disk
+from utils.persistence import load_saved_app_creds, save_app_creds, forget_app_creds, load_pace_model_from_disk, save_pace_model_to_disk
 from utils.pace_builder import build_pace_curves_from_races
 from utils.display import (
     display_course_details, display_segments_overview,
     display_prediction_results, display_pace_model_races,
-    display_pace_curves, display_model_metadata
+    display_model_metadata, format_seconds, display_pace_curve_analysis
 )
 from utils.prediction import run_prediction_simulation
 from models import Course, PaceModel
@@ -69,21 +69,14 @@ def run_predictions_ui(course: Course, feel: str, heat: str):
         # Store metadata
         st.session_state.prediction_meta = results["metadata"]
 
-        # Display altitude factor info
-        A_course = results["metadata"]["alt_speed_factor"]
-        st.caption(
-            f"Course median altitude ≈ {course.median_altitude:.0f} m → altitude factor {A_course:.2f}. "
-            f"Riegel k = {pace_model.riegel_k:.2f}."
-        )
-
         # Build results dataframe
         names = [f"AS{i + 1}" for i in range(len(course.leg_end_km) - 1)] + ["Finish"]
         st.session_state.eta_results = pd.DataFrame({
             "Segment": names,
             "Km": [round(x, 1) for x in course.leg_end_km],
-            "P50 (Best Guess)": [fmt(x) for x in results["p50"]],
-            "P10 (Optimistic)": [fmt(x) for x in results["p10"]],
-            "P90 (Pessimistic)": [fmt(x) for x in results["p90"]],
+            "Arrival time (best guess)": [format_seconds(x) for x in results["p50"]],
+            "P10 (Optimistic)": [format_seconds(x) for x in results["p10"]],
+            "P90 (Pessimistic)": [format_seconds(x) for x in results["p90"]],
         })
 
 
@@ -182,6 +175,6 @@ with tab_data:
     if not pace_model:
         st.info("Build a pace model from the sidebar to see your data.")
     else:
-        display_pace_model_races(pace_model)
-        display_pace_curves(pace_model)
+        display_pace_curve_analysis(pace_model, course)
         display_model_metadata(pace_model)
+        display_pace_model_races(pace_model)

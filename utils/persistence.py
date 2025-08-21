@@ -68,10 +68,3 @@ def forget_app_creds(app_credits_path: str):
         os.remove(app_credits_path)
     except FileNotFoundError:
         pass
-
-def fmt(sec: int) -> str:
-    """Formats seconds into H:MM format."""
-    sec = int(sec)
-    h = sec // config.SECONDS_PER_HOUR
-    m = (sec % config.SECONDS_PER_HOUR) // config.MINUTES_PER_HOUR
-    return f"{h:d}:{m:02d}"

@@ -4,10 +4,36 @@ Core prediction logic separated from UI concerns.
 
 import numpy as np
 import hashlib
-from utils.performance import altitude_impairment_multiplicative, apply_ultra_adjustments_progressive
-from utils.simulation import simulate_etas
+from utils.performance import altitude_impairment_multiplicative, apply_ultra_adjustments_progressive, fatigue_multiplier
+from utils.simulation import simulate_confidence_intervals
 import config
 
+
+def calculate_expected_time(course, speeds, feel, heat):
+    """
+    Calculate deterministic expected times at each checkpoint.
+    Returns array of cumulative times, one per checkpoint.
+    """
+    cumulative_times = []
+    total_time = 0.0
+
+    for leg_idx in range(len(course.legs_meters)):
+        # Base time for this leg
+        leg_distances = course.legs_meters[leg_idx]
+        base_time = np.sum(
+            np.where(speeds > 0, leg_distances / speeds, 0.0)
+        )
+
+        # Apply all multipliers
+        leg_time = (base_time *
+                    fatigue_multiplier(course.leg_ends_x[leg_idx]) *
+                    config.HEAT_MULT.get(heat, 1.0) *
+                    config.FEEL_MULT.get(feel, 1.0))
+
+        total_time += leg_time
+        cumulative_times.append(total_time)  # Store cumulative time at this checkpoint
+
+    return np.array(cumulative_times)
 
 def run_prediction_simulation(course, pace_model, feel, heat):
     """
@@ -40,11 +66,13 @@ def run_prediction_simulation(course, pace_model, feel, heat):
     seed = int(hashlib.sha256(seed_payload.encode()).hexdigest(), 16) % (2 ** 32)
     np.random.seed(seed)
 
-    # Run simulations
-    p10, p50, p90 = simulate_etas(
+    # Run simulations for confidence intervals
+    p10, p90 = simulate_confidence_intervals(
         course.legs_meters, speeds, pace_model.sigmas,
         course.leg_ends_x, heat, feel, sims=config.MC_SIMS
     )
+
+    p50 = calculate_expected_time(course, speeds, feel, heat)
 
     # Riegel Scaling (only slows down, never speeds up)
     T_base50 = p50[-1]
