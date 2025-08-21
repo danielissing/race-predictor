@@ -13,6 +13,7 @@ from utils.elevation import segment_stats
 from utils.geo import aid_station_markers
 from utils.performance import altitude_impairment_multiplicative
 import config
+from scipy.ndimage import gaussian_filter1d, uniform_filter1d
 
 def format_seconds(sec: int) -> str:
     """Formats seconds into H:MM format."""
@@ -133,6 +134,7 @@ def display_course_details(course):
 
         st_folium(m, width=None, height=400, returned_objects=[])
 
+
 def display_segments_overview(course):
     """Displays segment breakdown with elevation profiles and download option."""
     try:
@@ -147,13 +149,8 @@ def display_segments_overview(course):
             title = f"{start_name} → {end_name}"
 
             with st.expander(f"{title}  •  {length_km:.1f} km  •  +{int(gain_m)}m / -{int(loss_m)}m"):
-                fig, ax = plt.subplots(figsize=(7, 2.5))
-                x_km = seg['dist_m'] / 1000.0
-                y_m = seg['ele_m']
-                ax.plot(x_km, y_m)
-                ax.set_xlabel("Distance (km)")
-                ax.set_ylabel("Elevation (m)")
-                ax.set_title(title)
+                # Create the enhanced elevation plot
+                fig = create_elevation_profile(seg, title)
                 st.pyplot(fig)
                 plt.close(fig)
 
@@ -177,6 +174,142 @@ def display_segments_overview(course):
             )
     except Exception as e:
         st.warning(f"Could not render segments overview: {e}")
+
+
+def create_elevation_profile(seg, title):
+    """
+    Create an enhanced elevation profile with grade-based coloring.
+    Simpler version without legend for cleaner appearance.
+
+    Args:
+        seg: DataFrame segment with dist_m, ele_m, and grade_pct columns
+        title: Title for the plot
+
+    Returns:
+        matplotlib figure
+    """
+    import numpy as np
+    from scipy.ndimage import gaussian_filter1d
+
+    # Extract data
+    x_km = seg['dist_m'].values / 1000.0
+    y_m = seg['ele_m'].values
+
+    # Calculate grades if not present
+    if 'grade_pct' in seg.columns:
+        grades = seg['grade_pct'].values
+    else:
+        # Calculate grade from elevation change
+        distance_diff = np.diff(seg['dist_m'].values)
+        elevation_diff = np.diff(seg['ele_m'].values)
+        grades_raw = np.zeros(len(seg))
+        grades_raw[1:] = np.where(distance_diff > 0,
+                                  (elevation_diff / distance_diff) * 100,
+                                  0)
+        grades = grades_raw
+
+    # Apply Gaussian smoothing for more organic transitions
+    # Sigma scales with segment length for appropriate smoothing
+    sigma = max(2, min(20, len(grades) // 30))
+    if len(grades) > 10:
+        grades_smooth = gaussian_filter1d(grades, sigma=sigma)
+    else:
+        grades_smooth = grades
+
+    # Create figure with better aspect ratio
+    fig, ax = plt.subplots(figsize=(8, 3))
+
+    # Create a continuous color mapping based on grade
+    # Using a more intuitive color scheme
+    def grade_to_color(grade):
+        """Convert grade percentage to color with smooth transitions."""
+        abs_grade = abs(grade)
+
+        if abs_grade < 2:
+            # Flat - green
+            return '#2ECC71'
+        elif abs_grade < 5:
+            # Gentle - light green to yellow blend
+            blend = (abs_grade - 2) / 3
+            return interpolate_color('#2ECC71', '#F39C12', blend)
+        elif abs_grade < 10:
+            # Moderate - yellow to orange blend
+            blend = (abs_grade - 5) / 5
+            return interpolate_color('#F39C12', '#E67E22', blend)
+        elif abs_grade < 15:
+            # Steep - orange to red blend
+            blend = (abs_grade - 10) / 5
+            return interpolate_color('#E67E22', '#E74C3C', blend)
+        else:
+            # Very steep - red to dark red
+            blend = min(1, (abs_grade - 15) / 10)
+            return interpolate_color('#E74C3C', '#C0392B', blend)
+
+    def interpolate_color(color1, color2, blend):
+        """Interpolate between two hex colors."""
+        # Convert hex to RGB
+        c1 = [int(color1[i:i + 2], 16) for i in (1, 3, 5)]
+        c2 = [int(color2[i:i + 2], 16) for i in (1, 3, 5)]
+        # Interpolate
+        c = [int(c1[i] + (c2[i] - c1[i]) * blend) for i in range(3)]
+        # Convert back to hex
+        return '#{:02x}{:02x}{:02x}'.format(*c)
+
+    # Fill with grade-based colors in segments
+    # Use larger chunks for cleaner appearance
+    chunk_size = max(1, len(x_km) // 100)  # Aim for ~100 color segments max
+
+    for i in range(0, len(x_km) - 1, chunk_size):
+        end_idx = min(i + chunk_size + 1, len(x_km))
+        if end_idx > i + 1:
+            # Get average grade for this chunk
+            avg_grade = np.mean(grades_smooth[i:end_idx])
+            color = grade_to_color(avg_grade)
+
+            # Fill this section
+            ax.fill_between(x_km[i:end_idx],
+                            y_m[i:end_idx],
+                            np.min(y_m) - 100,  # Extend well below
+                            color=color,
+                            alpha=0.4,
+                            edgecolor='none')
+
+    # Plot the elevation profile line on top
+    ax.plot(x_km, y_m, color='#2C3E50', linewidth=2, zorder=3)
+
+    # Styling
+    ax.set_xlabel("Distance (km)", fontsize=10, color='#34495E')
+    ax.set_ylabel("Elevation (m)", fontsize=10, color='#34495E')
+    ax.set_title(title, fontsize=11, fontweight='bold', color='#2C3E50')
+
+    # Set y-axis limits with padding
+    y_range = y_m.max() - y_m.min()
+    y_padding = max(20, y_range * 0.15)  # At least 20m padding
+    ax.set_ylim(y_m.min() - y_padding, y_m.max() + y_padding)
+
+    # Subtle grid
+    ax.grid(True, alpha=0.2, linestyle=':', color='#95A5A6')
+
+    # Remove top and right spines for cleaner look
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    # Set background
+    ax.set_facecolor('#FAFAFA')
+    fig.patch.set_facecolor('white')
+
+    # Add subtle gradient indicator text
+    ax.text(0.02, 0.98, 'Green=Flat • Yellow=Moderate • Red=Steep',
+            transform=ax.transAxes,
+            fontsize=8,
+            verticalalignment='top',
+            color='#7F8C8D',
+            alpha=0.7,
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7, edgecolor='none'))
+
+    plt.tight_layout()
+
+    return fig
 
 
 def display_prediction_results():
