@@ -360,7 +360,7 @@ def display_prediction_metadata():
 - **Course median altitude:** ~`{meta['course_median_alt_m']:.0f} m`  
   • **Altitude speed factor:** `{a:.2f}` (≈ {alt_pct:.0f}% slower vs sea level)
 - **Recency weighting:** `{meta.get('recency_mode', 'mild')}`
-- **Riegel exponent for this race:** `{meta["riegel_scale_factor"]:.2f}`
+- **Riegel exponent for this race:** `{meta["riegel_k"]:.2f}`
 - **Ultra adjustments:** start after `{meta.get('start_threshold_h', 0):.0f}h`  
   • **Finish slowdown factor:** `×{meta.get('slow_factor_finish', 1):.2f}`  
   • **Rest added by finish:** `{format_seconds(meta.get('rest_added_finish_s', 0))}h`

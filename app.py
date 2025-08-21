@@ -57,14 +57,16 @@ def handle_oauth_callback():
         except Exception as e:
             st.error(f"OAuth error: {e}")
 
-
-def run_predictions_ui(course: Course, feel: str, heat: str):
-    """Run predictions and update UI with results."""
+def run_predictions_ui(course: Course, conditions: int):
+    """
+    Run predictions and update UI with results.
+    Now uses single conditions parameter instead of heat/feel.
+    """
     if st.button("Run Prediction", disabled=(not course or not st.session_state.pace_model)):
         pace_model = st.session_state.pace_model
 
-        # Run the core prediction logic
-        results = run_prediction_simulation(course, pace_model, feel, heat)
+        # Run the simplified prediction logic
+        results = run_prediction_simulation(course, pace_model, conditions)
 
         # Store metadata
         st.session_state.prediction_meta = results["metadata"]
@@ -72,11 +74,11 @@ def run_predictions_ui(course: Course, feel: str, heat: str):
         # Build results dataframe
         names = [f"AS{i + 1}" for i in range(len(course.leg_end_km) - 1)] + ["Finish"]
         st.session_state.eta_results = pd.DataFrame({
-            "Segment": names,
-            "Km": [round(x, 1) for x in course.leg_end_km],
-            "Arrival time (best guess)": [format_seconds(x) for x in results["p50"]],
-            "P10 (Optimistic)": [format_seconds(x) for x in results["p10"]],
-            "P90 (Pessimistic)": [format_seconds(x) for x in results["p90"]],
+            "Checkpoint": names,
+            "Distance (km)": [round(x, 1) for x in course.leg_end_km],
+            "Best Guess": [format_seconds(x) for x in results["p50"]],
+            "Optimistic (faster 15%)": [format_seconds(x) for x in results["p10"]],
+            "Pessimistic (slower 15%)": [format_seconds(x) for x in results["p90"]],
         })
 
 
@@ -149,9 +151,34 @@ with st.sidebar:
 
     course = get_course_from_session(aid_km_text, aid_units)
 
-    st.header("4. Race Day Conditions")
-    feel = st.selectbox("How do you feel?", ["good", "ok", "meh"], index=1)
-    heat = st.selectbox("Heat", ["cool", "moderate", "hot"], index=0)
+    st.header("4. Race Conditions")
+
+    # Single conditions slider replacing heat + feel
+    conditions = st.slider(
+        "Overall race conditions",
+        min_value=-2,
+        max_value=2,
+        value=0,
+        step=1,
+        help="""
+        Adjust based on all factors:
+        • Training quality
+        • Weather (heat/cold/wind/rain)
+        • How you feel
+        • Course technicality
+        • Race importance/motivation
+        """
+    )
+
+    # Show interpretation of selected value
+    condition_labels = {
+        -2: "😰 Terrible - Poor training, extreme weather, feeling awful",
+        -1: "😕 Poor - Some issues with prep/weather/feeling",
+        0: "😐 Normal - Typical race day conditions",
+        1: "😊 Good - Well prepared, favorable conditions",
+        2: "🚀 Perfect - Everything ideal, PR attempt!"
+    }
+    st.caption(condition_labels[conditions])
 
 # --- Race Tab ---
 with tab_race:
@@ -166,7 +193,7 @@ with tab_race:
 
         st.divider()
         st.subheader("Predictions")
-        run_predictions_ui(course, feel, heat)
+        run_predictions_ui(course, conditions) 
         display_prediction_results()
 
 # --- Data Tab ---

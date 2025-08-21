@@ -325,9 +325,6 @@ def _fit_riegel_exponent(used_races_df: pd.DataFrame) -> Tuple[float, float, flo
     The Riegel formula: T = T_ref * (D / D_ref) ^ k
 
     Where k captures how well you maintain pace over longer distances:
-    - k < 1.06: Good endurance (ultras are your strength)
-    - k = 1.06: Average endurance
-    - k > 1.06: Better at shorter distances
 
     Returns:
         Tuple of (k, reference_distance_km, reference_time_s)
