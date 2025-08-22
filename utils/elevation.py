@@ -10,8 +10,8 @@ import config
 
 def segment_stats(
         segment_df: pd.DataFrame,
-        resample_step_m: float = 20.0,
-        min_step_m: float = 3.0
+        resample_step_m: float = config.STEP_LENGTH,
+        min_step_m: float = float(config.DEFAULT_SMOOTH_WINDOW)
 ) -> Tuple[float, float, float, float, float]:
     """
     Calculate comprehensive statistics for a course segment.

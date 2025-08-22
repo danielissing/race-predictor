@@ -336,38 +336,6 @@ def display_prediction_results():
             st.session_state.prediction_meta = None
             st.rerun()
 
-    # Display model details if available
-    display_prediction_metadata()
-
-
-def display_prediction_metadata():
-    """Display detailed model metadata in an expander."""
-    meta = st.session_state.get("prediction_meta")
-    if not meta:
-        return
-
-    # Format reference race text
-    ref_txt = "—"
-    if meta.get("ref_distance_km") and meta.get("ref_time_s"):
-        ref_txt = f"{meta['ref_distance_km']:.1f} km, {format_seconds(meta['ref_time_s'])}"
-
-    # Calculate altitude slowdown percentage
-    a = float(meta.get("alt_speed_factor", 1.0))
-    alt_pct = (1.0 - a) * 100.0
-
-    with st.expander("Model details for this prediction", expanded=False):
-        st.markdown(f"""
-- **Course median altitude:** ~`{meta['course_median_alt_m']:.0f} m`  
-  • **Altitude speed factor:** `{a:.2f}` (≈ {alt_pct:.0f}% slower vs sea level)
-- **Recency weighting:** `{meta.get('recency_mode', 'mild')}`
-- **Riegel exponent for this race:** `{meta["riegel_k"]:.2f}`
-- **Ultra adjustments:** start after `{meta.get('start_threshold_h', 0):.0f}h`  
-  • **Finish slowdown factor:** `×{meta.get('slow_factor_finish', 1):.2f}`  
-  • **Rest added by finish:** `{format_seconds(meta.get('rest_added_finish_s', 0))}h`
-- **Predicted finish:** `{format_seconds(meta['finish_time_p50_s'])}h`
-        """.strip())
-
-
 def display_pace_model_races(pace_model):
     """Display the races used to build the pace model."""
     st.subheader("Races used for prediction")

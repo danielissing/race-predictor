@@ -57,10 +57,11 @@ def handle_oauth_callback():
         except Exception as e:
             st.error(f"OAuth error: {e}")
 
+
 def run_predictions_ui(course: Course, conditions: int):
     """
     Run predictions and update UI with results.
-    Now uses single conditions parameter instead of heat/feel.
+    Now uses single conditions parameter and clearer labels.
     """
     if st.button("Run Prediction", disabled=(not course or not st.session_state.pace_model)):
         pace_model = st.session_state.pace_model
@@ -71,15 +72,35 @@ def run_predictions_ui(course: Course, conditions: int):
         # Store metadata
         st.session_state.prediction_meta = results["metadata"]
 
-        # Build results dataframe
+        # Display key info about the prediction
+        meta = results["metadata"]
+        altitude_slowdown = (meta['alt_speed_factor'] - 1) * 100
+
+        # Show metadata
+        st.caption(
+            f"🏃 Riegel exponent: `{meta['riegel_k']:.2f}` | "
+            f"🅾️ Median altitude: ~`{meta['course_median_alt_m']:.0f} m` |"
+            f"🏔️ Altitude slowdown: `{altitude_slowdown:.0f}%` | "
+            f"⏱️ Fatigue multiplier: `×{meta.get('slow_factor_finish', 1):.2f}` | "
+            f"🛑 Rest/aid time: `{format_seconds(meta.get('rest_added_finish_s', 0))}h`"
+        )
+        # Build results dataframe with clearer labels
         names = [f"AS{i + 1}" for i in range(len(course.leg_end_km) - 1)] + ["Finish"]
         st.session_state.eta_results = pd.DataFrame({
             "Checkpoint": names,
             "Distance (km)": [round(x, 1) for x in course.leg_end_km],
-            "Best Guess": [format_seconds(x) for x in results["p50"]],
-            "Optimistic (faster 15%)": [format_seconds(x) for x in results["p10"]],
-            "Pessimistic (slower 15%)": [format_seconds(x) for x in results["p90"]],
+            "Average ETA": [format_seconds(x) for x in results["p50"]],
+            "Optimistic (P10)": [format_seconds(x) for x in results["p10"]],
+            "Pessimistic (P90)": [format_seconds(x) for x in results["p90"]],
         })
+
+        # Add helpful explanation
+        st.info(
+            "**How to read predictions:**\n"
+            "- **Average ETA**: Best guess for how long it will take you to finish\n"
+            "- **Optimistic (P10)**: You'll only finish this fast on your best days (10% chance)\n"
+            "- **Pessimistic (P90)**: You should finish faster than this 90% of the time"
+        )
 
 
 # --- Main App ---
