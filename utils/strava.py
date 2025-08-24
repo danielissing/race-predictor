@@ -8,11 +8,11 @@ import config
 
 os.makedirs(config.CACHE_DIR, exist_ok=True)
 
-def save_tokens(tokens: Dict[str, Any]):
+def _save_tokens(tokens: Dict[str, Any]):
     with open(config.TOKENS_PATH, "w") as f:
         json.dump(tokens, f)
 
-def load_tokens() -> Dict[str, Any] | None:
+def _load_tokens() -> Dict[str, Any] | None:
     if not os.path.exists(config.TOKENS_PATH):
         return None
     with open(config.TOKENS_PATH, "r") as f:
@@ -35,28 +35,28 @@ def exchange_code_for_token(client_id: str, client_secret: str, code: str) -> Di
     tokens = r.json()
     tokens["obtained_at"] = int(time.time())
     tokens["client_id_used"] = str(client_id)
-    save_tokens(tokens)
+    _save_tokens(tokens)
     return tokens
 
-def refresh_access_token(client_id: str, client_secret: str, refresh_token: str) -> Dict[str, Any]:
+def _refresh_access_token(client_id: str, client_secret: str, refresh_token: str) -> Dict[str, Any]:
     payload = {"client_id": client_id, "client_secret": client_secret, "grant_type": "refresh_token", "refresh_token": refresh_token}
     r = requests.post(config.STRAVA_TOKEN_URL, data=payload, timeout=config.DEFAULT_TIMEOUT); r.raise_for_status()
     if r.status_code >= 400:
         raise requests.HTTPError(f"{r.status_code} {r.text}", response=r)
-    tokens = r.json(); tokens["obtained_at"] = int(time.time()); save_tokens(tokens);
+    tokens = r.json(); tokens["obtained_at"] = int(time.time()); _save_tokens(tokens);
     return tokens
 
-def get_headers(access_token: str) -> Dict[str, str]:
+def _get_headers(access_token: str) -> Dict[str, str]:
     return {"Authorization": f"Bearer {access_token}"}
 
-def disconnect_strava():
+def _disconnect_strava():
     try:
         os.remove(config.TOKENS_PATH)
     except FileNotFoundError:
         pass
 
 def ensure_token(client_id: str, client_secret: str) -> Dict[str, Any] | None:
-    tokens = load_tokens()
+    tokens = _load_tokens()
     if not tokens:
         return None
     # If current client_id doesn't match the one that created the tokens, force reconnect
@@ -65,19 +65,19 @@ def ensure_token(client_id: str, client_secret: str) -> Dict[str, Any] | None:
     try:
         expires_at = tokens.get("expires_at", 0)
         if int(time.time()) >= int(expires_at) - 60:
-            tokens = refresh_access_token(client_id, client_secret, tokens["refresh_token"])
+            tokens = _refresh_access_token(client_id, client_secret, tokens["refresh_token"])
             tokens["client_id_used"] = str(client_id)
-            save_tokens(tokens)
+            _save_tokens(tokens)
         return tokens
     except requests.HTTPError as e:
         # If refresh fails (400/401), nuke tokens so UI shows "Connect Strava" again
         if getattr(e, "response", None) is not None and e.response.status_code in (400, 401):
-            disconnect_strava()
+            _disconnect_strava()
             return None
         raise
 
 def list_activities(access_token: str, per_page: int=200) -> List[Dict[str, Any]]:
-    activities = []; headers = get_headers(access_token); page = 1
+    activities = []; headers = _get_headers(access_token); page = 1
     params = {"per_page": min(per_page, 200)}
     while True:
         params["page"] = page
@@ -122,7 +122,7 @@ def get_activity_streams(access_token: str, activity_id: int, types=None) -> Dic
     # --- call Strava ---
     r = requests.get(
         f"{config.API_BASE}/activities/{activity_id}/streams",
-        headers=get_headers(access_token),
+        headers=_get_headers(access_token),
         params={"keys": ",".join(types), "key_by_type":"true"},
         timeout=config.DEFAULT_TIMEOUT
     )

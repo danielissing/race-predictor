@@ -2,10 +2,11 @@
 Build personalized pace curves from historical race data.
 Integrates with Strava to analyze past performances.
 """
-
+# packages
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, List, Tuple
+#local imports
 from utils.strava import get_activity_streams, is_run, is_race
 from utils.performance import altitude_impairment_multiplicative, recency_weight, weighted_percentile
 import config

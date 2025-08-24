@@ -57,7 +57,6 @@ def segment_stats(
 
     return length_km, gain_m, loss_m, min_elevation, max_elevation
 
-
 def resample_with_grade(
         df: pd.DataFrame,
         step_m: float = config.STEP_LENGTH,

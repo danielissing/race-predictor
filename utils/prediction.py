@@ -36,7 +36,7 @@ def _is_flat_race(course):
     return gain_per_km < config.ROAD_GAIN_PER_KM
 
 
-def calculate_base_times(course, speeds):
+def _calculate_base_times(course, speeds):
     """
     Calculate base time for each checkpoint using grade-specific speeds.
     Special handling for flat road races to use primarily flat pace.
@@ -421,7 +421,7 @@ def apply_ultra_adjustments(times, course):
     return np.array(adjusted), metadata
 
 
-def simulate_with_conditions(baseline_times, raw_base_times, course, speeds, sigmas, conditions, sims=config.MC_SIMS):
+def _simulate_with_conditions(baseline_times, raw_base_times, course, speeds, sigmas, conditions, sims=config.MC_SIMS):
     n = len(baseline_times)
     samples = np.zeros((sims, n))
 
@@ -512,7 +512,7 @@ def run_prediction_simulation(course, pace_model, conditions=0):
     debug_print(f"Altitude: {course.median_altitude:.0f}m -> speed factor: {altitude_factor:.3f}")
 
     # Step 2: Calculate base times from grade bins
-    base_times = calculate_base_times(course, speeds)
+    base_times = _calculate_base_times(course, speeds)
 
     # Step 3: Apply YOUR personal distance scaling
     scaled_times = apply_distance_scaling(base_times, course, pace_model)
@@ -526,7 +526,7 @@ def run_prediction_simulation(course, pace_model, conditions=0):
     debug_print(f"Running {config.MC_SIMS} simulations...")
 
     # Step 5: Monte Carlo simulation WITH conditions
-    p10, p50, p90 = simulate_with_conditions(
+    p10, p50, p90 = _simulate_with_conditions(
         adjusted_times,  # ultra-adjusted baseline (fatigue + rest)
         base_times,  # raw speed baseline (pre-scaling)
         course, speeds, pace_model.sigmas, conditions, sims=config.MC_SIMS

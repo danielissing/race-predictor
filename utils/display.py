@@ -2,18 +2,19 @@
 UI display helper functions for the Race Time Predictor app.
 All Streamlit-specific rendering logic lives here.
 """
-
+# packages
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import folium
 from streamlit_folium import st_folium
+from scipy.ndimage import gaussian_filter1d, uniform_filter1d
+#local imports
 from utils.elevation import segment_stats
 from utils.geo import aid_station_markers
 from utils.performance import altitude_impairment_multiplicative
 import config
-from scipy.ndimage import gaussian_filter1d, uniform_filter1d
 
 def format_seconds(sec: int) -> str:
     """Formats seconds into H:MM format."""
@@ -150,7 +151,7 @@ def display_segments_overview(course):
 
             with st.expander(f"{title}  •  {length_km:.1f} km  •  +{int(gain_m)}m / -{int(loss_m)}m"):
                 # Create the enhanced elevation plot
-                fig = create_elevation_profile(seg, title)
+                fig = _create_elevation_profile(seg, title)
                 st.pyplot(fig)
                 plt.close(fig)
 
@@ -176,7 +177,7 @@ def display_segments_overview(course):
         st.warning(f"Could not render segments overview: {e}")
 
 
-def create_elevation_profile(seg, title):
+def _create_elevation_profile(seg, title):
     """
     Create an enhanced elevation profile with grade-based coloring.
     Simpler version without legend for cleaner appearance.
@@ -370,7 +371,7 @@ def display_model_metadata(pace_model):
         """)
 
 
-def plot_pace_curves(pace_model, current_altitude_m=None):
+def _plot_pace_curves(pace_model, current_altitude_m=None):
     """
     Create a visualization of pace curves showing speed vs grade.
 
@@ -475,57 +476,6 @@ def plot_pace_curves(pace_model, current_altitude_m=None):
     return fig
 
 
-def plot_pace_comparison(pace_model, reference_speeds=None):
-    """
-    Compare your pace curve to a reference (e.g., world class runner).
-
-    Args:
-        pace_model: Your PaceModel object
-        reference_speeds: Optional dict with reference speeds by grade
-
-    Returns:
-        matplotlib figure
-    """
-    if pace_model is None or pace_model.pace_df is None:
-        return None
-
-    pace_df = pace_model.pace_df
-    grade_midpoints = (pace_df['lower_pct'].values + pace_df['upper_pct'].values) / 2
-    your_speeds = pace_df['speed_mps'].values
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-
-    # Plot your speeds
-    ax.plot(grade_midpoints, your_speeds, 'b-o', linewidth=2,
-            markersize=8, label='Your Speed')
-
-    # Add reference if provided
-    if reference_speeds:
-        ref_speeds = [reference_speeds.get(g, your_speeds[i])
-                      for i, g in enumerate(grade_midpoints)]
-        ax.plot(grade_midpoints, ref_speeds, 'g--s', linewidth=1.5,
-                markersize=6, label='Reference Runner', alpha=0.7)
-
-        # Show percentage differences
-        pct_diff = (your_speeds - np.array(ref_speeds)) / np.array(ref_speeds) * 100
-        for i, (g, pct) in enumerate(zip(grade_midpoints, pct_diff)):
-            if abs(pct) > 5:  # Only show significant differences
-                ax.annotate(f'{pct:+.0f}%',
-                            xy=(g, your_speeds[i]),
-                            xytext=(5, 5), textcoords='offset points',
-                            fontsize=8, alpha=0.7)
-
-    ax.set_xlabel('Grade (%)', fontsize=12)
-    ax.set_ylabel('Speed (m/s)', fontsize=12)
-    ax.grid(True, alpha=0.3)
-    ax.axvline(x=0, color='gray', linestyle=':', alpha=0.5)
-
-    plt.title('Pace Curve Comparison', fontsize=14, fontweight='bold')
-    ax.legend()
-    plt.tight_layout()
-    return fig
-
-
 def display_pace_curve_analysis(pace_model, current_course=None):
     """
     Display comprehensive pace curve analysis in Streamlit.
@@ -547,7 +497,7 @@ def display_pace_curve_analysis(pace_model, current_course=None):
         st.info(f"Showing speeds adjusted for current course altitude: {altitude_m:.0f}m")
 
     # Create and display the main pace curve plot
-    fig = plot_pace_curves(pace_model, altitude_m)
+    fig = _plot_pace_curves(pace_model, altitude_m)
     if fig:
         st.pyplot(fig)
         plt.close(fig)

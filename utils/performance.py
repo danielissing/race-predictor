@@ -1,6 +1,5 @@
 """
 Performance modeling and adjustment functions.
-Handles altitude effects, ultra-distance adjustments, and fatigue modeling.
 """
 
 import numpy as np
@@ -36,117 +35,6 @@ def altitude_impairment_multiplicative(
 
     elevation_above_threshold_km = (mean_elevation - elevation_threshold) / 1000.0
     return 1.0 - alpha * elevation_above_threshold_km
-
-
-def fatigue_multiplier(progress: float) -> float:
-    """
-    Calculate cumulative fatigue factor based on race progress.
-
-    Models the progressive slowdown that occurs during long races due to
-    glycogen depletion, muscle damage, and central fatigue.
-
-    Args:
-        progress: Fraction of race completed (0.0 to 1.0)
-
-    Returns:
-        Time multiplier (>= 1.0, where 1.0 = no fatigue)
-
-    Fatigue progression:
-        0-30% of race: No fatigue (multiplier = 1.00)
-        30-60% of race: Mild fatigue (increases to 1.03)
-        60-100% of race: Moderate fatigue (increases to 1.08)
-    """
-    if progress < 0.30:
-        return 1.00
-    elif progress < 0.60:
-        # Linear increase from 1.00 to 1.03
-        return 1.00 + (progress - 0.30) * (0.03 / 0.30)
-    else:
-        # Linear increase from 1.03 to 1.08
-        return 1.03 + (progress - 0.60) * (0.05 / 0.40)
-
-
-def apply_ultra_adjustments_progressive(p10, p50, p90, leg_ends_x):
-    """
-    Apply progressive adjustments for ultra-distance races.
-
-    Ultra races (>6 hours) require special modeling for:
-    1. Progressive slowdown due to cumulative fatigue
-    2. Time spent at aid stations for refueling/rest
-    3. Increased variability in later stages
-
-    Args:
-        p10, p50, p90: Percentile predictions (arrays)
-        leg_ends_x: Fractional progress at each checkpoint (0.0 to 1.0)
-
-    Returns:
-        Tuple of (adjusted_p10, adjusted_p50, adjusted_p90, metadata_dict)
-
-    The adjustments are progressive:
-    - Start after START_TH_H hours (typically 6h)
-    - Scale with race duration (longer = more adjustment)
-    - Add both multiplicative slowdown and additive rest time
-    """
-    T50 = float(p50[-1])
-    hours = T50 / config.SECONDS_PER_HOUR
-
-    p10 = p10.copy()
-    p50 = p50.copy()
-    p90 = p90.copy()
-
-    # No adjustments for shorter races
-    if hours <= config.START_TH_H:
-        meta = dict(
-            start_threshold_h=config.START_TH_H,
-            ultra_gamma=config.ULTRA_GAMMA,
-            rest_per_24h_h=config.REST_PER_24H,
-            slow_factor_finish=1.0,
-            rest_added_finish_s=0.0,
-        )
-        return p10, p50, p90, meta
-
-    slow_finish = 1.0
-    rest_finish_s = 0.0
-
-    # Apply progressive adjustments at each checkpoint
-    for i, x in enumerate(leg_ends_x):
-        # Estimated hours to this checkpoint
-        hours_here = hours * float(x)
-
-        # Calculate adjustment based on time beyond threshold
-        # "blocks" = how many 24-hour periods beyond the threshold
-        blocks = max(0.0, (hours_here - config.START_TH_H) / 24.0)
-
-        # Multiplicative slowdown (fatigue accumulation)
-        slow_factor = 1.0 + config.ULTRA_GAMMA * blocks
-
-        # Additive rest time (aid station stops, brief rests)
-        rest_seconds = (config.REST_PER_24H * config.SECONDS_PER_HOUR) * blocks
-
-        # Apply adjustments with different weights for percentiles
-        # P90 gets more rest time (pessimistic scenario)
-        p10[i] = p10[i] * slow_factor + 0.25 * rest_seconds
-        p50[i] = p50[i] * slow_factor + 0.50 * rest_seconds
-        p90[i] = p90[i] * slow_factor + 1.00 * rest_seconds
-
-        slow_finish = slow_factor
-        rest_finish_s = rest_seconds
-
-    # Additional right-tail skew for very long races (>18 hours)
-    if hours >= config.SLEEP_CUTOFF:
-        # Up to 10% additional slowdown for P90 in very long races
-        skew = 1.0 + 0.1 * max(0.0, (hours - config.SLEEP_CUTOFF) / config.SLEEP_CUTOFF)
-        p90 = p90 * skew
-
-    meta = dict(
-        start_threshold_h=config.START_TH_H,
-        ultra_gamma=config.ULTRA_GAMMA,
-        rest_per_24h_h=config.REST_PER_24H,
-        slow_factor_finish=float(slow_finish),
-        rest_added_finish_s=float(rest_finish_s),
-    )
-
-    return p10, p50, p90, meta
 
 
 def recency_weight(start_date_str: str, mode: str = "mild") -> float:
