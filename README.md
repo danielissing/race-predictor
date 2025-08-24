@@ -1,7 +1,7 @@
 # Trail Running ETA Predictor
 
 A local Streamlit app that predicts **arrival times plus 10th/90th percentile** at each aid station for a trail race.
-It uses your **Strava race history** to learn a personal **speed vs. grade** curve, combines it with a **GPX** of the course (including elevation), and includes a simple simulation to account for fatigue and conditions.
+It uses your **Strava race history** to learn a personal **speed vs. grade** curve, combines it with a **GPX** of the course (including elevation), and includes a simple simulation to account for fatigue and conditions. There is also some helpful visualization for each leg of the race.
 
 ---
 
@@ -24,11 +24,7 @@ It uses your **Strava race history** to learn a personal **speed vs. grade** cur
 * OS: Windows/macOS/Linux
 * Strava account
 
-Python packages (installed via `requirements.txt`):
-
-* `streamlit`, `pandas`, `numpy`, `requests`
-* `gpxpy` (GPX parsing), `matplotlib` (elevation plots)
-* `folium`, `streamlit-folium` (course map)
+See [list of Python packages](https://github.com/danielissing/race-predictor/blob/main/requirements.txt) for required libraries (installed via `requirements.txt`).
 
 ---
 
@@ -101,7 +97,7 @@ In the app’s left sidebar:
 * **Aid stations**: paste **cumulative** distances, e.g. `10, 21, 33, 50`.
 
   * Toggle **km / mi** for the input. All outputs are metric.
-* **Conditions**: choose **Heat** (cool/moderate/hot), **Feeling** (good/ok/meh) and **Recency Weighing** (how much weight to put on more recent results) to adjust for race-day conditions.
+* **Conditions**: Simple knob to adjusy for terrain and race-day conditions.
 
 ![sidebar2](https://github.com/danielissing/race-predictor/blob/main/images/sidebar_2.png)
 #### Course map
@@ -116,7 +112,7 @@ In the app’s left sidebar:
 
   * an **elevation mini-plot** (click to expand)
   * **length (km)**, **elevation gain/loss (m)**, **min/max elevation**
-* Elevation gain/loss uses distance-based resampling and a small hysteresis threshold to avoid over-counting tiny wiggles (closer to watch values).
+* Elevation gain/loss uses distance-based resampling and a small hysteresis threshold to avoid over-counting tiny wiggles.
 * Example: ![segments](https://github.com/danielissing/race-predictor/blob/main/images/segments.png)
 
 ---
@@ -125,14 +121,15 @@ In the app’s left sidebar:
 
 * **Build from my Strava races**: pulls **Run Type = Race** activities and their **streams**.
 * The model bins by grade and computes your **median speed per bin** (with variability from 10th–90th percentile spread).
+* The model applies an altitude correction to derive your **sea-level** normalized speed.
 * A list of **races used** (name/date/distance) is shown to sanity-check.
 * Pace curves and used races are saved to `data/pace_curves.csv` and `data/used_races.csv` so they reload automatically on restart.
-* Output: ![pace_curves](https://github.com/danielissing/race-predictor/blob/main/images/pace_curves.png)
+* Output: ![pace_curve](https://github.com/danielissing/race-predictor/blob/main/images/pace_curve.png)
 
 ### C) Predict ETAs
 
 * Click **Run prediction**.
-* You’ll get a table of **ETA P10 / P50 / P90** at each station and can **download CSV**.
+* You’ll get a table of your ETA, as well as 10th/90th percentile at each station, which you can download.
 * Results are cached, so clicking **Download** doesn’t recompute. Recompute only when you click **Run** again or change inputs.
 * Output: ![etas](https://github.com/danielissing/race-predictor/blob/main/images/etas.png)
 
@@ -140,15 +137,25 @@ In the app’s left sidebar:
 >
 > * Streams are **cached** to `data/strava_cache/streams_<activity_id>.json` so you don’t re-hit the API.
 > * You can decide to only include races from the last X months and cap a **max number of races** (configurable in code).
+ 
+When clicking **Run prediction**, the code will also be logging intermediate results (times before and after applying various adjustments) to help you understand what's going on if predictions seem wildly off. The output looks like this:
+
+![debug](https://github.com/danielissing/race-predictor/blob/main/images/debug.png)
 
 ---
 
 ## How It Works (brief)
 
-1. **Pace curves**: For each grade bin (e.g., -12% to -8%), the app looks at your **race streams** and estimates a **median running speed** and a variability factor.
-2. **Course breakdown**: The GPX is segmented by your aid stations; within each leg, we compute how many meters fall into each grade bin.
-3. **Fatigue & conditions**: A simple fatigue curve makes later legs a bit slower; heat/feeling multipliers adjust globally.
-4. **Monte Carlo**: We sample speeds around the medians (correlated across bins for “good/bad day” effects) to produce **P10/P50/P90** ETAs.
+1. **Pace curves**: For each grade bin (e.g., -12% to -8%), the app looks at your **race streams** and estimates a **median running speed** and a variability factor. It then corrects these median speeds in order to normalize the values to sea level (since you're typically slower when running in high altitude).
+2. **Course breakdown**: The GPX is segmented by your aid stations; within each leg, we compute how many meters fall into each grade bin. We also add a penalty (if needed) for each bin to account for the altitude of this particular race.
+3. **Fatigue & conditions**: A fatigue curve makes later legs a bit slower and ensures that overall pace drops for races much longer than your median distance. For very long efforts, it also builds in appropriate breaks for aid station time and rest/sleep (currently modeled post hoc to fit the data). A "race day conditions" knob allows to slightly adjust ETAs globally.
+4. **Monte Carlo simulation**: We sample speeds around the medians (correlated across bins for “good/bad day” effects) to produce **P10/P90** ETAs.
+
+The [config.py](https://github.com/danielissing/race-predictor/blob/main/config.py) file allows you to fine-tune many parameters to improve predictions. The most important ones are:
+
+* `MAX_RIEGEL_K`: Upper bound for how much slower you'll run in later stages of a race.
+* `ULTRA_START_HOURS`: After how many hours the code will start adding rest/sleep time.
+* `FATIGUE_SLOPE` and `REST_SLOPE`: Determine how quickly additional time will be added as the race progresses.
 
 ---
 
