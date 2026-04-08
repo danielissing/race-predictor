@@ -431,8 +431,7 @@ def _simulate_with_conditions(baseline_times, raw_base_times, course, speeds, si
     leg_scale = np.divide(base_incr, np.maximum(raw_incr, config.EPSILON))
 
     # Road vs trail + variance sizing (unchanged)
-    gain_per_km = course.gain_m / course.total_km if course.total_km > 0 else 0
-    is_road = gain_per_km < config.ROAD_GAIN_PER_KM
+    is_road = _is_flat_race(course)
     race_hours = baseline_times[-1] / 3600.0
     rel_var = _get_relative_variance(race_hours, is_road)
 

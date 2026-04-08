@@ -9,7 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import folium
 from streamlit_folium import st_folium
-from scipy.ndimage import gaussian_filter1d, uniform_filter1d
+from scipy.ndimage import gaussian_filter1d
 #local imports
 from utils.elevation import segment_stats
 from utils.geo import aid_station_markers
@@ -189,9 +189,6 @@ def _create_elevation_profile(seg, title):
     Returns:
         matplotlib figure
     """
-    import numpy as np
-    from scipy.ndimage import gaussian_filter1d
-
     # Extract data
     x_km = seg['dist_m'].values / 1000.0
     y_m = seg['ele_m'].values
