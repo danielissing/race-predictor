@@ -1,22 +1,17 @@
 """
 Core prediction logic - simplified and data-driven.
 Uses personal Riegel k from race history for accurate scaling.
-WITH DEBUG OUTPUT for troubleshooting ultra predictions
+
+Enable debug output by setting the RACE_PREDICTOR_DEBUG environment variable,
+or by calling:  logging.getLogger("prediction").setLevel(logging.DEBUG)
 """
 
+import logging
 import numpy as np
-import hashlib
 from utils.performance import altitude_impairment_multiplicative
 import config
 
-# Debug flag - set to False to disable all debug output
-DEBUG = True
-
-
-def debug_print(msg):
-    """Helper function for debug output"""
-    if DEBUG:
-        print(f"[DEBUG] {msg}")
+log = logging.getLogger("prediction")
 
 
 def format_time(seconds):
@@ -51,11 +46,11 @@ def _calculate_base_times(course, speeds):
     # Detect if this is likely a flat road race
     is_flat_road = _is_flat_race(course)
 
-    debug_print("=" * 60)
-    debug_print("STAGE 1: CALCULATE BASE TIMES")
-    debug_print(f"Course: {course.total_km:.1f}km, {course.gain_m:.0f}m gain")
-    debug_print(f"Is flat road race: {is_flat_road}")
-    debug_print(f"Number of checkpoints: {len(course.legs_meters)}")
+    log.debug("=" * 60)
+    log.debug("STAGE 1: CALCULATE BASE TIMES")
+    log.debug(f"Course: {course.total_km:.1f}km, {course.gain_m:.0f}m gain")
+    log.debug(f"Is flat road race: {is_flat_road}")
+    log.debug(f"Number of checkpoints: {len(course.legs_meters)}")
 
     cumulative_times = []
     total_time = 0.0
@@ -93,10 +88,10 @@ def _calculate_base_times(course, speeds):
             # Show first few checkpoints and any near 10k
             if leg_idx < 3 or (9 <= dist_km <= 11) or leg_idx == len(course.legs_meters) - 1:
                 pace_min_km = (total_time / 60) / dist_km if dist_km > 0 else 0
-                debug_print(
+                log.debug(
                     f"  Checkpoint {leg_idx}: {dist_km:.1f}km -> {format_time(total_time)} ({pace_min_km:.1f} min/km)")
 
-    debug_print(f"Base finish time: {format_time(cumulative_times[-1])}")
+    log.debug(f"Base finish time: {format_time(cumulative_times[-1])}")
     return np.array(cumulative_times)
 
 
@@ -176,8 +171,8 @@ def apply_distance_scaling(base_times, course, pace_model):
     Returns:
         Scaled checkpoint times
     """
-    debug_print("=" * 60)
-    debug_print("STAGE 2: APPLY DISTANCE SCALING")
+    log.debug("=" * 60)
+    log.debug("STAGE 2: APPLY DISTANCE SCALING")
 
     # Detect if this is likely a flat road race
     is_flat_road = _is_flat_race(course)
@@ -193,15 +188,15 @@ def apply_distance_scaling(base_times, course, pace_model):
     # Reference distance (what your pace curves are calibrated to)
     ref_distance = pace_model.ref_distance_km if pace_model.ref_distance_km else config.DEFAULT_DISTANCE_KM
 
-    debug_print(f"Riegel k: {k:.3f}")
-    debug_print(f"Reference distance: {ref_distance:.1f} km")
-    debug_print(f"Target distance: {course.total_km:.1f} km")
-    debug_print(f"Distance ratio: {course.total_km / ref_distance:.2f}x")
+    log.debug(f"Riegel k: {k:.3f}")
+    log.debug(f"Reference distance: {ref_distance:.1f} km")
+    log.debug(f"Target distance: {course.total_km:.1f} km")
+    log.debug(f"Distance ratio: {course.total_km / ref_distance:.2f}x")
 
     # If this race is very close to your reference, minimal adjustment
     if abs(course.total_km - ref_distance) < 5:
         scale_factor = 1.0
-        debug_print("Race close to reference distance - no scaling")
+        log.debug("Race close to reference distance - no scaling")
     else:
         distance_ratio = course.total_km / ref_distance
 
@@ -216,7 +211,7 @@ def apply_distance_scaling(base_times, course, pace_model):
             else:  # Medium trail races shorter than ref
                 effective_k = 1 + (k - 1) * 0.7  # 70% effect
             scale_factor = distance_ratio ** (effective_k - 1)
-            debug_print(f"Shorter than ref - effective k: {effective_k:.3f}")
+            log.debug(f"Shorter than ref - effective k: {effective_k:.3f}")
         else:
             # Longer races
             if is_flat_road:
@@ -226,14 +221,14 @@ def apply_distance_scaling(base_times, course, pace_model):
                 # Trail ultras use full k
                 effective_k = k
             scale_factor = distance_ratio ** (effective_k - 1)
-            debug_print(f"Longer than ref - effective k: {effective_k:.3f}")
+            log.debug(f"Longer than ref - effective k: {effective_k:.3f}")
 
-    debug_print(f"Overall scale factor: {scale_factor:.3f}")
+    log.debug(f"Overall scale factor: {scale_factor:.3f}")
 
     # Determine progression type
     if course.total_km > config.MEDIUM_DISTANCE_KM:
         grace_distance_km = min(config.SHORT_DISTANCE_KM, course.total_km * 0.15)
-        debug_print(f"Ultra race - using sigmoid progression with {grace_distance_km:.1f}km grace zone")
+        log.debug(f"Ultra race - using sigmoid progression with {grace_distance_km:.1f}km grace zone")
 
     # Apply progressively through the race
     scaled_times = []
@@ -291,19 +286,19 @@ def apply_distance_scaling(base_times, course, pace_model):
                 adjustment = min(adjustment, 1.35)
 
             if old_adjustment != adjustment:
-                debug_print(f"  Capped adjustment at {distance_km:.1f}km: {old_adjustment:.3f} -> {adjustment:.3f}")
+                log.debug(f"  Capped adjustment at {distance_km:.1f}km: {old_adjustment:.3f} -> {adjustment:.3f}")
 
         scaled_times.append(base_times[i] * adjustment)
 
         # Debug output for key checkpoints
         dist_km = x * course.total_km
         if i < 3 or (9 <= dist_km <= 11) or i == len(course.leg_ends_x) - 1:
-            debug_print(f"  Checkpoint {i}: {dist_km:.1f}km")
-            debug_print(f"    Progress factor: {progress_factor:.3f}, Adjustment: {adjustment:.3f}x")
-            debug_print(f"    Time: {format_time(base_times[i])} -> {format_time(scaled_times[i])}")
+            log.debug(f"  Checkpoint {i}: {dist_km:.1f}km")
+            log.debug(f"    Progress factor: {progress_factor:.3f}, Adjustment: {adjustment:.3f}x")
+            log.debug(f"    Time: {format_time(base_times[i])} -> {format_time(scaled_times[i])}")
 
-    debug_print(f"Scaled finish time: {format_time(scaled_times[-1])}")
-    debug_print(f"Total scaling effect: {scaled_times[-1] / base_times[-1]:.3f}x")
+    log.debug(f"Scaled finish time: {format_time(scaled_times[-1])}")
+    log.debug(f"Total scaling effect: {scaled_times[-1] / base_times[-1]:.3f}x")
 
     return np.array(scaled_times)
 
@@ -322,13 +317,13 @@ def apply_ultra_adjustments(times, course):
     finish_hours = times[-1] / config.SECONDS_PER_HOUR
     course_km = course.total_km
 
-    debug_print("=" * 60)
-    debug_print("STAGE 3: APPLY ULTRA ADJUSTMENTS")
-    debug_print(f"Scaled finish time: {finish_hours:.1f} hours")
+    log.debug("=" * 60)
+    log.debug("STAGE 3: APPLY ULTRA ADJUSTMENTS")
+    log.debug(f"Scaled finish time: {finish_hours:.1f} hours")
 
     # No adjustments for short races
     if finish_hours <= config.ULTRA_START_HOURS:
-        debug_print(f"No ultra adjustments needed (< {config.ULTRA_START_HOURS} hours)")
+        log.debug(f"No ultra adjustments needed (< {config.ULTRA_START_HOURS} hours)")
         return times, {
             "ultra_adjusted": False,
             "slow_factor_finish": 1.0,
@@ -342,17 +337,17 @@ def apply_ultra_adjustments(times, course):
     total_rest_h = config.REST_SLOPE * (finish_hours - config.ULTRA_START_HOURS)  # start adding rest for courses > 5h.
     total_rest_s = total_rest_h * config.SECONDS_PER_HOUR
 
-    debug_print(f"Base fatigue factor: {fatigue_factor:.3f}x")
-    debug_print(f"Base rest time: {format_time(total_rest_s)}")
+    log.debug(f"Base fatigue factor: {fatigue_factor:.3f}x")
+    log.debug(f"Base rest time: {format_time(total_rest_s)}")
 
     # Apply special adjustments for ultra races
     if course_km > config.EXTREME_DISTANCE_KM:
         total_rest_s *= config.EXTREME_DISTANCE_FACTOR
         fatigue_factor *= config.EXTREME_FATIGUE_FACTOR
-        debug_print(f"Extreme distance adjustments applied (>{config.EXTREME_DISTANCE_KM}km)")
+        log.debug(f"Extreme distance adjustments applied (>{config.EXTREME_DISTANCE_KM}km)")
 
-    debug_print(f"Final fatigue factor at finish: {fatigue_factor:.3f}x")
-    debug_print(f"Total rest time for entire race: {format_time(total_rest_s)}")
+    log.debug(f"Final fatigue factor at finish: {fatigue_factor:.3f}x")
+    log.debug(f"Total rest time for entire race: {format_time(total_rest_s)}")
 
     # Apply adjustments progressively through the race
     adjusted = []
@@ -402,14 +397,14 @@ def apply_ultra_adjustments(times, course):
 
         # Debug output for key checkpoints
         if i < 3 or (9 <= distance_km <= 11) or i == len(times) - 1:
-            debug_print(f"  Checkpoint {i}: {distance_km:.1f}km")
-            debug_print(f"    Running fatigue: {current_fatigue:.3f}x")
-            debug_print(f"    Rest time at this checkpoint: {format_time(checkpoint_rest)}")
-            debug_print(f"    Time: {format_time(times[i])} -> {format_time(adjusted_time)}")
-            debug_print(f"    Net change: +{format_time(adjusted_time - times[i])}")
+            log.debug(f"  Checkpoint {i}: {distance_km:.1f}km")
+            log.debug(f"    Running fatigue: {current_fatigue:.3f}x")
+            log.debug(f"    Rest time at this checkpoint: {format_time(checkpoint_rest)}")
+            log.debug(f"    Time: {format_time(times[i])} -> {format_time(adjusted_time)}")
+            log.debug(f"    Net change: +{format_time(adjusted_time - times[i])}")
 
-    debug_print(f"Ultra-adjusted finish time: {format_time(adjusted[-1])}")
-    debug_print(f"Total time added: {format_time(adjusted[-1] - times[-1])}")
+    log.debug(f"Ultra-adjusted finish time: {format_time(adjusted[-1])}")
+    log.debug(f"Total time added: {format_time(adjusted[-1] - times[-1])}")
 
     metadata = {
         "ultra_adjusted": True,
@@ -421,21 +416,68 @@ def apply_ultra_adjustments(times, course):
     return np.array(adjusted), metadata
 
 
-def _simulate_with_conditions(baseline_times, raw_base_times, course, speeds, sigmas, conditions, sims=config.MC_SIMS):
-    n = len(baseline_times)
-    samples = np.zeros((sims, n))
+def _generate_day_factors(sims, rel_var, tail_cap):
+    """
+    Generate day-performance factors for all simulations at once.
 
+    Uses a mixture model:
+      - 70% normal days
+      - 25% off days (slower)
+      - 5% outliers (split between amazing and disaster)
+    """
+    day_factors = np.empty(sims)
+
+    # Draw mixture component for each simulation
+    u = np.random.random(sims)
+
+    # Normal days
+    normal_mask = u < config.PROB_NORMAL
+    n_normal = np.count_nonzero(normal_mask)
+    day_factors[normal_mask] = np.random.normal(
+        0.0, config.NORMAL_SIGMA_MULT * rel_var, size=n_normal
+    )
+
+    # Off days (half-normal, positive = slower)
+    off_mask = (~normal_mask) & (u < config.PROB_NORMAL + config.PROB_OFF)
+    n_off = np.count_nonzero(off_mask)
+    day_factors[off_mask] = np.abs(np.random.normal(
+        0.0, config.OFF_SIGMA_MULT * rel_var, size=n_off
+    ))
+
+    # Outliers
+    outlier_mask = ~(normal_mask | off_mask)
+    n_outlier = np.count_nonzero(outlier_mask)
+    if n_outlier > 0:
+        is_good = np.random.random(n_outlier) < config.OUTLIER_GOOD_SHARE
+        n_good = np.count_nonzero(is_good)
+        n_bad = n_outlier - n_good
+
+        outlier_vals = np.empty(n_outlier)
+        if n_good > 0:
+            outlier_vals[is_good] = -np.abs(np.random.normal(
+                0.0, config.AMAZING_SIGMA_MULT * rel_var, size=n_good
+            ))
+        if n_bad > 0:
+            mu = np.log(max(1e-12, 0.8 * rel_var))
+            tails = np.random.lognormal(mean=mu, sigma=config.LOGNORM_SIGMA, size=n_bad)
+            outlier_vals[~is_good] = np.minimum(tails, tail_cap)
+
+        day_factors[outlier_mask] = outlier_vals
+
+    return day_factors
+
+
+def _simulate_with_conditions(baseline_times, raw_base_times, course, speeds, sigmas, conditions, sims=config.MC_SIMS):
     # Per-leg scalers: how much each leg should be stretched by fatigue+rest+distance effects
     raw_incr = np.diff(np.hstack([0.0, raw_base_times]))
     base_incr = np.diff(np.hstack([0.0, baseline_times]))
     leg_scale = np.divide(base_incr, np.maximum(raw_incr, config.EPSILON))
 
-    # Road vs trail + variance sizing (unchanged)
+    # Road vs trail + variance sizing
     is_road = _is_flat_race(course)
     race_hours = baseline_times[-1] / 3600.0
     rel_var = _get_relative_variance(race_hours, is_road)
 
-    # tails/conditions/grade as you already do...
     base = config.TAILCAP_BASE_ROAD if is_road else config.TAILCAP_BASE_TRAIL
     k_tail = config.TAILCAP_K_ROAD if is_road else config.TAILCAP_K_TRAIL
     tail_cap = np.clip(base + k_tail * rel_var, config.TAILCAP_MIN, config.TAILCAP_MAX)
@@ -443,37 +485,33 @@ def _simulate_with_conditions(baseline_times, raw_base_times, course, speeds, si
     condition_mean = -conditions * config.COND_MEAN_PER_UNIT
     condition_var = 1.0 - conditions * config.COND_VAR_PER_UNIT
 
-    p_norm = config.PROB_NORMAL
-    p_off = config.PROB_NORMAL + config.PROB_OFF
-    p_good = config.OUTLIER_GOOD_SHARE
+    # --- Vectorized day factors (sims,) ---
+    day_factors = _generate_day_factors(sims, rel_var, tail_cap)
+    total_factors = 1.0 + condition_mean + day_factors * condition_var  # (sims,)
 
-    for s in range(sims):
-        u = np.random.random()
-        if u < p_norm:
-            day_factor = np.random.normal(0.0, config.NORMAL_SIGMA_MULT * rel_var)
-        elif u < p_off:
-            day_factor = abs(np.random.normal(0.0, config.OFF_SIGMA_MULT * rel_var))
-        else:
-            if np.random.random() < p_good:
-                day_factor = -abs(np.random.normal(0.0, config.AMAZING_SIGMA_MULT * rel_var))
-            else:
-                mu = np.log(max(1e-12, 0.8 * rel_var))
-                tail = np.random.lognormal(mean=mu, sigma=config.LOGNORM_SIGMA)
-                day_factor = min(tail, tail_cap)
+    # --- Vectorized grade factors (sims, n_bins) ---
+    n_bins = len(sigmas)
+    grade_factors = np.maximum(
+        np.random.normal(1.0, sigmas * grade_variation, size=(sims, n_bins)),
+        0.3
+    )
 
-        total_factor = 1.0 + condition_mean + day_factor * condition_var
-        grade_factors = np.maximum(np.random.normal(1.0, sigmas * grade_variation), 0.3)
+    # Varied speeds per sim: (sims, n_bins)
+    varied_speeds = np.maximum(speeds[None, :] * grade_factors, 0.1)
 
-        total = 0.0
-        for i, leg_dists in enumerate(course.legs_meters):
-            # your raw leg time from grade bins:
-            varied_speeds = np.maximum(speeds * grade_factors, 0.1)
-            leg_time_raw = np.sum(leg_dists / varied_speeds)
+    # Stack leg distances into (n_legs, n_bins) matrix
+    legs_matrix = np.array(course.legs_meters)  # (n_legs, n_bins)
 
-            # **apply per-leg baseline scaling** then day/conditions:
-            leg_time = leg_time_raw * leg_scale[i]
-            total += leg_time * total_factor
-            samples[s, i] = total
+    # Raw leg times: for each sim and leg, sum(leg_dist / varied_speed) over bins
+    # (1, n_legs, n_bins) / (sims, 1, n_bins) → sum over bins → (sims, n_legs)
+    raw_leg_times = np.sum(
+        legs_matrix[None, :, :] / varied_speeds[:, None, :],
+        axis=2
+    )
+
+    # Apply per-leg scaling (fatigue+rest+distance) and day factor, then cumsum
+    scaled_leg_times = raw_leg_times * leg_scale[None, :] * total_factors[:, None]
+    samples = np.cumsum(scaled_leg_times, axis=1)  # (sims, n_legs)
 
     return (np.percentile(samples, 10, axis=0),
             np.percentile(samples, 50, axis=0),
@@ -500,15 +538,15 @@ def run_prediction_simulation(course, pace_model, conditions=0):
     Returns:
         dict with p10, p50, p90 arrays and metadata
     """
-    debug_print("\n" + "=" * 60)
-    debug_print("STARTING RACE PREDICTION")
-    debug_print("=" * 60)
+    log.debug("\n" + "=" * 60)
+    log.debug("STARTING RACE PREDICTION")
+    log.debug("=" * 60)
 
     # Step 1: Altitude adjustment
     altitude_factor = altitude_impairment_multiplicative(course.median_altitude)
     speeds = pace_model.sea_level_speeds * altitude_factor
 
-    debug_print(f"Altitude: {course.median_altitude:.0f}m -> speed factor: {altitude_factor:.3f}")
+    log.debug(f"Altitude: {course.median_altitude:.0f}m -> speed factor: {altitude_factor:.3f}")
 
     # Step 2: Calculate base times from grade bins
     base_times = _calculate_base_times(course, speeds)
@@ -519,10 +557,10 @@ def run_prediction_simulation(course, pace_model, conditions=0):
     # Step 4: Apply ultra adjustments if needed (>6 hours)
     adjusted_times, ultra_meta = apply_ultra_adjustments(scaled_times, course)
 
-    debug_print("=" * 60)
-    debug_print("STAGE 4: MONTE CARLO SIMULATION")
-    debug_print(f"Conditions: {conditions} (±2 scale)")
-    debug_print(f"Running {config.MC_SIMS} simulations...")
+    log.debug("=" * 60)
+    log.debug("STAGE 4: MONTE CARLO SIMULATION")
+    log.debug(f"Conditions: {conditions} (±2 scale)")
+    log.debug(f"Running {config.MC_SIMS} simulations...")
 
     # Step 5: Monte Carlo simulation WITH conditions
     p10, p50, p90 = _simulate_with_conditions(
@@ -531,25 +569,25 @@ def run_prediction_simulation(course, pace_model, conditions=0):
         course, speeds, pace_model.sigmas, conditions, sims=config.MC_SIMS
     )
 
-    debug_print("\n" + "=" * 60)
-    debug_print("FINAL RESULTS SUMMARY")
-    debug_print("=" * 60)
+    log.debug("\n" + "=" * 60)
+    log.debug("FINAL RESULTS SUMMARY")
+    log.debug("=" * 60)
 
     # Show key checkpoint results
     for i in range(len(course.leg_ends_x)):
         dist_km = course.leg_ends_x[i] * course.total_km
         if i < 3 or (9 <= dist_km <= 11) or i == len(course.leg_ends_x) - 1:
-            debug_print(f"Checkpoint {i}: {dist_km:.1f}km")
-            debug_print(f"  P10: {format_time(p10[i])}")
-            debug_print(f"  P50: {format_time(p50[i])}")
-            debug_print(f"  P90: {format_time(p90[i])}")
+            log.debug(f"Checkpoint {i}: {dist_km:.1f}km")
+            log.debug(f"  P10: {format_time(p10[i])}")
+            log.debug(f"  P50: {format_time(p50[i])}")
+            log.debug(f"  P90: {format_time(p90[i])}")
 
-    debug_print("\nTransformation summary:")
-    debug_print(f"  Base finish: {format_time(base_times[-1])}")
-    debug_print(f"  After distance scaling: {format_time(scaled_times[-1])} ({scaled_times[-1] / base_times[-1]:.3f}x)")
-    debug_print(
+    log.debug("\nTransformation summary:")
+    log.debug(f"  Base finish: {format_time(base_times[-1])}")
+    log.debug(f"  After distance scaling: {format_time(scaled_times[-1])} ({scaled_times[-1] / base_times[-1]:.3f}x)")
+    log.debug(
         f"  After ultra adjustments: {format_time(adjusted_times[-1])} ({adjusted_times[-1] / base_times[-1]:.3f}x)")
-    debug_print(f"  Final P50: {format_time(p50[-1])}")
+    log.debug(f"  Final P50: {format_time(p50[-1])}")
 
     # Build metadata for transparency
     k_used = get_distance_specific_k(pace_model, course.total_km)
