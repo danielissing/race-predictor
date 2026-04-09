@@ -9,7 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import folium
 from streamlit_folium import st_folium
-from scipy.ndimage import gaussian_filter1d, uniform_filter1d
+from scipy.ndimage import gaussian_filter1d
 #local imports
 from utils.elevation import segment_stats
 from utils.geo import aid_station_markers
@@ -166,7 +166,7 @@ def display_segments_overview(course):
 
         if seg_rows:
             seg_df = pd.DataFrame(seg_rows)
-            st.dataframe(seg_df, use_container_width=True)
+            st.dataframe(seg_df, width="stretch")
             st.download_button(
                 "📥 Download segments CSV",
                 seg_df.to_csv(index=False).encode(),
@@ -189,9 +189,6 @@ def _create_elevation_profile(seg, title):
     Returns:
         matplotlib figure
     """
-    import numpy as np
-    from scipy.ndimage import gaussian_filter1d
-
     # Extract data
     x_km = seg['dist_m'].values / 1000.0
     y_m = seg['ele_m'].values
@@ -320,7 +317,7 @@ def display_prediction_results():
         return
 
     # Display the results table
-    st.dataframe(st.session_state.eta_results, use_container_width=True)
+    st.dataframe(st.session_state.eta_results, width="stretch")
 
     # Action buttons
     col1, col2 = st.columns(2)
@@ -355,7 +352,7 @@ def display_pace_model_races(pace_model):
     if cols:
         st.dataframe(
             display_df[cols].sort_values('date', ascending=False).reset_index(drop=True),
-            use_container_width=True
+            width="stretch"
         )
 
 
@@ -544,6 +541,6 @@ def display_pace_curve_analysis(pace_model, current_course=None):
 
         st.dataframe(
             display_df[['grade_range', 'pace_min_km', 'uncertainty']],
-            use_container_width=True,
+            width="stretch",
             hide_index=True
         )

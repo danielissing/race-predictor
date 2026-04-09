@@ -93,7 +93,7 @@ In the app’s left sidebar:
 
 ### A) 📁 Upload course & set aid stations (🏁 *Upcoming race* tab)
 
-* **GPX**: upload the race route GPX.
+* **GPX**: upload the race route GPX. (An example file is included at `race_examples/shasta.gpx`.)
 * **Aid stations**: paste **cumulative** distances, e.g. `10, 21, 33, 50`.
 
   * Toggle **km / mi** for the input. All outputs are metric.
@@ -138,9 +138,12 @@ In the app’s left sidebar:
 > * Streams are **cached** to `data/strava_cache/streams_<activity_id>.json` so you don’t re-hit the API.
 > * You can decide to only include races from the last X months and cap a **max number of races** (configurable in code).
  
-When clicking **Run prediction**, the code will also be logging intermediate results (times before and after applying various adjustments) to help you understand what's going on if predictions seem wildly off. The output looks like this:
+When clicking **Run prediction**, the code logs intermediate results (times before and after applying various adjustments) via Python's `logging` module. To see them, set the log level:
 
-![debug](https://github.com/danielissing/race-predictor/blob/main/images/debug.png)
+```bash
+RACE_PREDICTOR_DEBUG=1 streamlit run app.py
+# or in Python: logging.getLogger("prediction").setLevel(logging.DEBUG)
+```
 
 ---
 
@@ -156,6 +159,36 @@ The [config.py](https://github.com/danielissing/race-predictor/blob/main/config.
 * `MAX_RIEGEL_K`: Upper bound for how much slower you'll run in later stages of a race.
 * `ULTRA_START_HOURS`: After how many hours the code will start adding rest/sleep time.
 * `FATIGUE_SLOPE` and `REST_SLOPE`: Determine how quickly additional time will be added as the race progresses.
+
+---
+
+## Validation
+
+A standalone script lets you check how well the model predicts your past race times using real terrain data from cached Strava streams:
+
+```bash
+python validate.py              # quick: use existing model from disk
+python validate.py --loocv      # leave-one-out cross-validation (slower, more honest)
+python validate.py --plot       # also save plots to data/validation/
+python validate.py --csv        # export per-race results to data/validation/results.csv
+```
+
+Quick mode reuses the saved pace model; LOOCV rebuilds the model excluding each race in turn. Both print a formatted table plus summary stats (MAE, bias, RMSE, P10-P90 coverage).
+
+### Validation plots (`--plot`)
+
+The `--plot` flag generates a 4-panel figure saved to `data/validation/validation_plots.png`:
+
+* **Error distribution (top-left):** Histogram of P50 prediction errors as a percentage of actual time. Negative values mean the model predicted a faster time than reality. The orange line marks the mean bias.
+* **Actual vs Predicted (top-right):** Scatter comparing actual finish times to predicted P50. Green dots fell within the P10-P90 confidence interval; red dots did not. Points on the dashed diagonal would be perfect predictions.
+* **Error by distance (bottom-left):** Box plots of error grouped by distance category, with sample counts shown. Reveals whether the model is systematically biased for certain race lengths.
+* **Residuals vs distance (bottom-right):** Raw error scatter against distance in km. Useful for spotting trends (e.g., larger errors at longer distances).
+
+Summary statistics (MAE, bias, RMSE, P10-P90 coverage) are annotated at the bottom of the figure.
+
+### CSV export (`--csv`)
+
+The `--csv` flag writes one row per validated race to `data/validation/results.csv`, including race metadata, actual and predicted times (both in seconds and H:MM:SS), error percentage, and whether the actual time fell within the P10-P90 band.
 
 ---
 
@@ -178,7 +211,7 @@ The [config.py](https://github.com/danielissing/race-predictor/blob/main/config.
   Make sure you upload a valid GPX. The app reads the file **once** and reuses the bytes everywhere; avoid re-uploading mid-run.
 
 * **High elevation gain**
-  The app uses distance resampling + hysteresis (e.g., 20 m step, 3 m threshold). You can tune those in `utils/gpx.py` (`segment_stats`).
+  The app uses distance resampling + hysteresis (e.g., 10 m step, 5 m threshold). You can tune those in `utils/elevation.py` (`segment_stats`).
 
 * **Strava rate limit (HTTP 429)**
   Wait \~15 minutes. The app caches streams, so already-fetched races won’t re-hit the API.

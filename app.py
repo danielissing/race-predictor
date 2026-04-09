@@ -1,6 +1,13 @@
+import logging
+import os
 import streamlit as st
 import pandas as pd
 import hashlib
+
+# Enable prediction debug logging via environment variable
+if os.environ.get("RACE_PREDICTOR_DEBUG"):
+    logging.basicConfig(level=logging.DEBUG)
+    logging.getLogger("prediction").setLevel(logging.DEBUG)
 
 # Local imports
 from utils.strava import build_auth_url, exchange_code_for_token, ensure_token, list_activities
