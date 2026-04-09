@@ -3,6 +3,7 @@ Build personalized pace curves from historical race data.
 Integrates with Strava to analyze past performances.
 """
 # packages
+import logging
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, List, Tuple
@@ -10,6 +11,8 @@ from typing import Dict, Any, List, Tuple
 from utils.strava import get_activity_streams, is_run, is_race
 from utils.performance import altitude_impairment_multiplicative, recency_weight, weighted_percentile
 import config
+
+log = logging.getLogger(__name__)
 
 
 def build_pace_curves_from_races(
@@ -65,6 +68,11 @@ def build_pace_curves_from_races(
         if race_data:
             used_race_metadata.append(race_data)
 
+    # Collect rest data from processed races (strip from metadata before DataFrame)
+    rest_data_list = [r["_rest_data"] for r in used_race_metadata if r.get("_rest_data")]
+    for r in used_race_metadata:
+        r.pop("_rest_data", None)
+
     # Create DataFrames
     used_races_df = _create_used_races_dataframe(used_race_metadata)
     curves_df = _create_pace_curves_dataframe(
@@ -74,6 +82,9 @@ def build_pace_curves_from_races(
     # Fit personal Riegel exponent
     riegel_k, ref_distance_km, ref_time_s = _fit_riegel_exponent(used_races_df)
 
+    # Fit rest model from stream data
+    rest_a, rest_b, rest_beta, rest_n = _fit_rest_model(rest_data_list)
+
     # Build metadata dictionary
     meta = {
         "alpha": config.ELEVATION_IMPAIRMENT,
@@ -82,9 +93,160 @@ def build_pace_curves_from_races(
         "ref_distance_km": float(ref_distance_km) if ref_distance_km else None,
         "ref_time_s": float(ref_time_s) if ref_time_s else None,
         "n_races": int(len(used_races_df)) if used_races_df is not None else 0,
+        "rest_model_a": float(rest_a),
+        "rest_model_b": float(rest_b),
+        "rest_distribution_beta": float(rest_beta),
+        "rest_n_races": int(rest_n),
     }
 
     return curves_df, used_races_df, meta
+
+
+def _extract_rest_data(streams: Dict, elapsed_time_s: float, distance_km: float) -> Dict[str, Any] | None:
+    """Extract rest statistics from a race's stream data.
+
+    Uses velocity_smooth to identify stopped periods and computes:
+    - rest_fraction: total stopped time / elapsed time
+    - rest_cdf_points: cumulative rest distribution at 10 equidistant checkpoints
+
+    Returns None if the data quality is too low.
+    """
+    time_data = streams.get("time", {}).get("data")
+    vel_data = streams.get("velocity_smooth", {}).get("data")
+    dist_data = streams.get("distance", {}).get("data")
+
+    if not time_data or not vel_data or not dist_data:
+        return None
+    if len(time_data) < 10:
+        return None
+
+    time_arr = np.array(time_data, dtype=float)
+    vel_arr = np.array(vel_data, dtype=float)
+    dist_arr = np.array(dist_data, dtype=float)
+
+    # Quality check: average sampling interval
+    total_duration = time_arr[-1] - time_arr[0]
+    if total_duration <= 0:
+        return None
+    avg_interval = total_duration / len(time_arr)
+    if avg_interval > config.REST_MAX_SAMPLE_INTERVAL:
+        return None
+
+    # Quality check: elapsed time must be long enough
+    elapsed_hours = elapsed_time_s / config.SECONDS_PER_HOUR
+    if elapsed_hours < config.REST_MIN_ELAPSED_HOURS:
+        return None
+
+    # Quality check: moving speed sanity (exclude corrupted velocity data)
+    dt = np.diff(time_arr)
+    dd = np.diff(dist_arr)
+    moving_mask = vel_arr[1:] >= config.REST_VELOCITY_THRESHOLD
+    moving_time = np.sum(dt[moving_mask])
+    moving_dist = np.sum(dd[moving_mask])
+    if moving_time > 0:
+        moving_speed_kmh = (moving_dist / moving_time) * 3.6
+        if moving_speed_kmh > config.REST_MAX_MOVING_SPEED_KMH:
+            return None
+
+    # Compute stopped time per interval
+    stopped_mask = vel_arr[1:] < config.REST_VELOCITY_THRESHOLD
+    stopped_time = np.sum(dt[stopped_mask])
+    rest_fraction = stopped_time / total_duration
+
+    # Compute rest CDF at 10 equally-spaced distance checkpoints
+    total_dist = dist_arr[-1]
+    if total_dist <= 0:
+        return None
+
+    n_checkpoints = 10
+    checkpoint_dists = np.linspace(total_dist / n_checkpoints, total_dist, n_checkpoints)
+    cumulative_rest = np.cumsum(dt * stopped_mask)
+    # Map each checkpoint distance to cumulative rest
+    rest_cdf = np.zeros(n_checkpoints)
+    for ci, cd in enumerate(checkpoint_dists):
+        idx = np.searchsorted(dist_arr[1:], cd, side="right")
+        idx = min(idx, len(cumulative_rest) - 1)
+        rest_cdf[ci] = cumulative_rest[idx]
+
+    # Normalize CDF to [0, 1]
+    if rest_cdf[-1] > 0:
+        rest_cdf = rest_cdf / rest_cdf[-1]
+    else:
+        rest_cdf = np.linspace(0, 1, n_checkpoints)
+
+    running_hours = (total_duration - stopped_time) / config.SECONDS_PER_HOUR
+
+    return {
+        "rest_fraction": float(rest_fraction),
+        "rest_cdf_points": rest_cdf.tolist(),
+        "elapsed_hours": float(elapsed_hours),
+        "running_hours": float(running_hours),
+        "sample_interval_s": float(avg_interval),
+    }
+
+
+def _fit_rest_model(rest_data_list: List[Dict]) -> Tuple[float, float, float, int]:
+    """Fit rest model parameters from extracted rest data.
+
+    Fits:
+    - rest_fraction = a * ln(running_hours) + b  (log-linear)
+    - rest CDF = x^beta  (power-law distribution)
+
+    Returns (a, b, beta, n_qualifying_races).
+    Falls back to config defaults if fewer than REST_MIN_RACES_FOR_FIT qualifying races.
+    """
+    if not rest_data_list:
+        return config.REST_FALLBACK_A, config.REST_FALLBACK_B, config.REST_FALLBACK_BETA, 0
+
+    qualifying = [d for d in rest_data_list
+                  if d["running_hours"] > 0 and d["rest_fraction"] > 0]
+
+    if len(qualifying) < config.REST_MIN_RACES_FOR_FIT:
+        return config.REST_FALLBACK_A, config.REST_FALLBACK_B, config.REST_FALLBACK_BETA, len(qualifying)
+
+    # Fit rest_fraction = a * ln(running_hours) + b
+    ln_hours = np.array([np.log(d["running_hours"]) for d in qualifying])
+    fractions = np.array([d["rest_fraction"] for d in qualifying])
+
+    n = len(qualifying)
+    sx = np.sum(ln_hours)
+    sy = np.sum(fractions)
+    sxx = np.sum(ln_hours ** 2)
+    sxy = np.sum(ln_hours * fractions)
+    denom = n * sxx - sx * sx
+    if abs(denom) < config.EPSILON:
+        a, b = config.REST_FALLBACK_A, config.REST_FALLBACK_B
+    else:
+        a = float((n * sxy - sx * sy) / denom)
+        b = float((sy - a * sx) / n)
+
+    # Fit distribution beta from averaged CDFs via log-log regression on F(x) = x^beta
+    # x = normalized progress [0.1, 0.2, ..., 1.0], F(x) = averaged CDF value
+    x_points = np.linspace(0.1, 1.0, 10)
+    avg_cdf = np.mean([d["rest_cdf_points"] for d in qualifying], axis=0)
+
+    # Filter to points where both x and F(x) are > 0 for log-log
+    valid = (x_points > 0) & (avg_cdf > 0) & (avg_cdf < 1)
+    if np.sum(valid) >= 3:
+        log_x = np.log(x_points[valid])
+        log_f = np.log(avg_cdf[valid])
+        # beta = slope of log(F) vs log(x)
+        n_v = np.sum(valid)
+        sx_v = np.sum(log_x)
+        sy_v = np.sum(log_f)
+        sxx_v = np.sum(log_x ** 2)
+        sxy_v = np.sum(log_x * log_f)
+        denom_v = n_v * sxx_v - sx_v * sx_v
+        if abs(denom_v) > config.EPSILON:
+            beta = float((n_v * sxy_v - sx_v * sy_v) / denom_v)
+            beta = max(0.5, min(beta, 5.0))  # sanity bounds
+        else:
+            beta = config.REST_FALLBACK_BETA
+    else:
+        beta = config.REST_FALLBACK_BETA
+
+    log.info("Rest model fit: a=%.4f, b=%.4f, beta=%.2f from %d races", a, b, beta, len(qualifying))
+    return a, b, beta, len(qualifying)
 
 
 def _filter_and_deduplicate_races(activities: List[Dict]) -> List[Dict]:
@@ -148,15 +310,21 @@ def _process_single_race(
     if not used_any:
         return None
 
+    # Extract rest data from the same streams
+    elapsed_time_s = int(activity.get("elapsed_time") or 0)
+    distance_km = round(activity.get("distance", 0) / 1000.0, 2)
+    rest_data = _extract_rest_data(streams, elapsed_time_s, distance_km)
+
     # Return race metadata
     return {
         "id": activity_id,
         "name": activity.get("name", "(unnamed)"),
         "date": (activity.get("start_date", "") or "")[:10],
-        "distance_km": round(activity.get("distance", 0) / 1000.0, 2),
-        "elapsed_time_s": int(activity.get("elapsed_time") or 0),
+        "distance_km": distance_km,
+        "elapsed_time_s": elapsed_time_s,
         "median_alt_m": median_alt,
         "weight": round(race_weight, 3),
+        "_rest_data": rest_data,
     }
 
 

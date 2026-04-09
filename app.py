@@ -82,21 +82,61 @@ def run_predictions_ui(course: Course, conditions: int):
         # Display key info about the prediction
         meta = results["metadata"]
         altitude_slowdown = (meta['alt_speed_factor'] - 1) * 100
+        rest_source = meta.get("rest_source", "fallback")
+        rest_label = "learned" if rest_source == "learned" else "default"
 
         # Show metadata
         st.caption(
             f"🏃 Riegel exponent: `{meta['riegel_k']:.2f}` | "
             f"🅾️ Median altitude: ~`{meta['course_median_alt_m']:.0f} m` |"
             f"🏔️ Altitude slowdown: `{altitude_slowdown:.0f}%` | "
-            f"⏱️ Fatigue multiplier: `×{meta.get('slow_factor_finish', 1):.2f}` | "
-            f"🛑 Rest/aid time: `{format_seconds(meta.get('rest_added_finish_s', 0))}h`"
+            f"⏱️ Fatigue multiplier: `x{meta.get('slow_factor_finish', 1):.2f}` | "
+            f"🛑 Rest/aid time: `{format_seconds(meta.get('rest_added_finish_s', 0))}h` ({rest_label})"
         )
-        # Build results dataframe with clearer labels
+
+        # Build results dataframe with arrival/departure/rest columns
         names = [f"AS{i + 1}" for i in range(len(course.leg_end_km) - 1)] + ["Finish"]
+        n_cp = len(names)
+        running_only = results.get("running_only_p50", results["p50"])
+        p50 = results["p50"]
+
+        # Compute arrival, departure, rest per checkpoint
+        arrivals = []
+        departures = []
+        rests = []
+        for i in range(n_cp):
+            # Rest allocated up to this checkpoint
+            cumulative_rest = p50[i] - running_only[i]
+            # Rest allocated up to previous checkpoint
+            prev_rest = (p50[i - 1] - running_only[i - 1]) if i > 0 else 0.0
+            rest_here = cumulative_rest - prev_rest
+
+            arrival = running_only[i] + prev_rest  # arrive = running + prior rest
+            departure = arrival + rest_here         # depart = arrive + rest at this stop
+
+            is_finish = (i == n_cp - 1)
+            if is_finish:
+                # Finish: arrival is the final time, no departure rest
+                arrival = p50[i]
+                rest_here = 0.0
+                departure = arrival
+
+            arrivals.append(arrival)
+            departures.append(departure)
+            rests.append(rest_here)
+
+        # Format rest as mm:ss for readability
+        def fmt_rest(s):
+            s = max(0, int(s))
+            m, sec = divmod(s, 60)
+            return f"{m}:{sec:02d}" if s > 0 else "-"
+
         st.session_state.eta_results = pd.DataFrame({
             "Checkpoint": names,
             "Distance (km)": [round(x, 1) for x in course.leg_end_km],
-            "Average ETA": [format_seconds(x) for x in results["p50"]],
+            "Arrival (P50)": [format_seconds(x) for x in arrivals],
+            "Departure (P50)": [format_seconds(x) for x in departures],
+            "Rest": [fmt_rest(x) for x in rests],
             "Optimistic (P10)": [format_seconds(x) for x in results["p10"]],
             "Pessimistic (P90)": [format_seconds(x) for x in results["p90"]],
         })
@@ -104,9 +144,11 @@ def run_predictions_ui(course: Course, conditions: int):
         # Add helpful explanation
         st.info(
             "**How to read predictions:**\n"
-            "- **Average ETA**: Best guess for how long it will take you to finish\n"
-            "- **Optimistic (P10)**: You'll only finish this fast on your best days (10% chance)\n"
-            "- **Pessimistic (P90)**: You should finish faster than this 90% of the time"
+            "- **Arrival**: When you reach the checkpoint (running + prior rest)\n"
+            "- **Departure**: When you leave (arrival + rest at this stop)\n"
+            "- **Rest**: Predicted time spent at this checkpoint\n"
+            "- **Optimistic (P10)**: 10% chance of being this fast\n"
+            "- **Pessimistic (P90)**: 90% chance of being faster than this"
         )
 
 

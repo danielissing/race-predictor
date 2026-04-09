@@ -1,3 +1,4 @@
+import math
 import pandas as pd
 import numpy as np
 import hashlib
@@ -85,3 +86,31 @@ class PaceModel:
     @property
     def sigmas(self) -> np.ndarray:
         return self.pace_df["sigma_rel"].values
+
+    # --- Rest model ---
+
+    @property
+    def rest_model(self) -> tuple[float, float, float]:
+        """(a, b, beta) — rest_frac = a*ln(hours)+b, CDF = x^beta."""
+        a = self.meta.get("rest_model_a", config.REST_FALLBACK_A)
+        b = self.meta.get("rest_model_b", config.REST_FALLBACK_B)
+        beta = self.meta.get("rest_distribution_beta", config.REST_FALLBACK_BETA)
+        return a, b, beta
+
+    @property
+    def rest_n_races(self) -> int:
+        return self.meta.get("rest_n_races", 0)
+
+    def predict_rest_fraction(self, running_hours: float) -> float:
+        """Predict rest as fraction of elapsed time, given running hours."""
+        a, b, _ = self.rest_model
+        if running_hours <= 0:
+            return 0.0
+        frac = a * math.log(running_hours) + b
+        return max(0.0, min(frac, config.REST_MAX_FRACTION))
+
+    def rest_cdf(self, progress: float) -> float:
+        """Cumulative fraction of total rest taken at given race progress [0,1]."""
+        _, _, beta = self.rest_model
+        progress = max(0.0, min(1.0, progress))
+        return progress ** beta

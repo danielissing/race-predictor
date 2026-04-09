@@ -95,13 +95,29 @@ MOUNTAIN_DISTANCE_KM = 250  # Mountain ultra threshold
 # for ultra adjustments
 EXTREME_DISTANCE_FACTOR = 1.3  # Extra rest time multiplier
 EXTREME_FATIGUE_FACTOR = 1.08  # Extra fatigue multiplier
-SHORT_REST_PCT = 0.01
-MED_REST_PCT = 0.05
-LONG_REST_PCT = 0.15
+# DEPRECATED: replaced by learned rest model — kept for reference
+# SHORT_REST_PCT = 0.01
+# MED_REST_PCT = 0.05
+# LONG_REST_PCT = 0.15
+# REST_SLOPE = 0.1  # Linear increase in rest time based on race time
 
-# Modeling fatigue and rest
+# Modeling fatigue
 FATIGUE_SLOPE = 0.0005 # Linear increase of fatigue factor based on race time
-REST_SLOPE = 0.1  # Linear increase in rest time based on race time
+
+# ========================================
+# REST MODEL PARAMETERS (learned from Strava streams)
+# ========================================
+REST_VELOCITY_THRESHOLD = 0.5      # m/s — below this is "stopped"
+REST_MAX_SAMPLE_INTERVAL = 4.0     # exclude sparse recordings (seconds/point)
+REST_MAX_MOVING_SPEED_KMH = 15.0   # exclude corrupted velocity data
+REST_MIN_RACES_FOR_FIT = 5         # minimum races to fit rest model
+REST_MIN_ELAPSED_HOURS = 2.0       # skip short races for rest extraction
+
+REST_FALLBACK_A = 0.08             # default log coefficient
+REST_FALLBACK_B = -0.10            # default intercept
+REST_FALLBACK_BETA = 1.5           # default distribution exponent
+REST_MAX_FRACTION = 0.50           # cap rest at 50% of total time
+REST_DAY_FACTOR_COUPLING = 0.5     # how much rest scales with day performance
 
 #Modeling variance
 DEFAULT_VARIANCE = 0.12 # relative variance for short races

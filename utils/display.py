@@ -359,12 +359,21 @@ def display_pace_model_races(pace_model):
 def display_model_metadata(pace_model):
     """Display model metadata in an expander."""
     with st.expander("Model details (read-only)"):
+        a, b, beta = pace_model.rest_model
+        rest_n = pace_model.rest_n_races
+        rest_status = "Learned from data" if rest_n >= config.REST_MIN_RACES_FOR_FIT else "Using defaults (not enough data)"
+
         st.markdown(f"""
 - **Recency mode:** `{pace_model.meta.get('recency_mode', 'mild')}`
-- **Altitude penalty α:** `{config.ELEVATION_IMPAIRMENT}` per 1000 m above 300 m 
+- **Altitude penalty α:** `{config.ELEVATION_IMPAIRMENT}` per 1000 m above 300 m
 - **Global Riegel exponent (using data from all races):** `{pace_model.riegel_k:.2f}`
 - **Median race length:** `{pace_model.ref_distance_km or '—'} km`
 - **Races used:** `{pace_model.meta.get('n_races', 0)}`
+
+**Rest model:** {rest_status}
+- a={a:.4f}, b={b:.4f} (rest_frac = a * ln(hours) + b)
+- beta={beta:.2f} (rest distribution exponent)
+- Races with qualifying rest data: {rest_n}
         """)
 
 
