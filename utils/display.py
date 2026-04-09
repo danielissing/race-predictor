@@ -166,7 +166,7 @@ def display_segments_overview(course):
 
         if seg_rows:
             seg_df = pd.DataFrame(seg_rows)
-            st.dataframe(seg_df, use_container_width=True)
+            st.dataframe(seg_df, width="stretch")
             st.download_button(
                 "📥 Download segments CSV",
                 seg_df.to_csv(index=False).encode(),
@@ -317,7 +317,7 @@ def display_prediction_results():
         return
 
     # Display the results table
-    st.dataframe(st.session_state.eta_results, use_container_width=True)
+    st.dataframe(st.session_state.eta_results, width="stretch")
 
     # Action buttons
     col1, col2 = st.columns(2)
@@ -352,7 +352,7 @@ def display_pace_model_races(pace_model):
     if cols:
         st.dataframe(
             display_df[cols].sort_values('date', ascending=False).reset_index(drop=True),
-            use_container_width=True
+            width="stretch"
         )
 
 
@@ -541,6 +541,6 @@ def display_pace_curve_analysis(pace_model, current_course=None):
 
         st.dataframe(
             display_df[['grade_range', 'pace_min_km', 'uncertainty']],
-            use_container_width=True,
+            width="stretch",
             hide_index=True
         )
