@@ -13,7 +13,8 @@ It uses your **Strava race history** to learn a personal **speed vs. grade** cur
 * **Course map** (OpenStreetMap) with your route and **aid-station markers** 
 * **ETA predictions** at each aid station with **P10/P50/P90** bands 
 * **Segments overview**: elevation mini-plot per leg + length (km), gain/loss (m), min/max elevation
-* **Used races** table: name, date, distance—so you can sanity-check inputs
+* **Used races** table with **exclusion toggles**: name, date, distance—so you can sanity-check inputs and exclude non-representative races (fun runs, DNFs, etc.)
+* **Learned model parameters**: fatigue slope and variance scale are calibrated from your own race data instead of hardcoded defaults
 * Local caching of **Strava tokens, activity streams, pace curves** to keep API calls minimal and survive restarts
 
 ---
@@ -122,7 +123,12 @@ In the app’s left sidebar:
 * **Build from my Strava races**: pulls **Run Type = Race** activities and their **streams**.
 * The model bins by grade and computes your **median speed per bin** (with variability from 10th–90th percentile spread).
 * The model applies an altitude correction to derive your **sea-level** normalized speed.
-* A list of **races used** (name/date/distance) is shown to sanity-check.
+* **Race exclusions**: the race table has checkboxes so you can exclude non-representative races (fun runs, DNFs, backyard ultras). Click "Save exclusions & rebuild model" to apply.
+* **Learned parameters**: the model now learns three things from your data beyond pace curves:
+  * **Rest model** — rest fraction and distribution from stream velocity data
+  * **Fatigue slope** — how much you slow down in the later stages of long races, estimated by comparing first-quartile vs last-quartile velocity on flat terrain
+  * **Variance scale** — calibrates the width of P10-P90 confidence bands so they cover ~80% of your past races
+* The "Model details" expander shows the status of each learned parameter (learned vs default) and the number of qualifying races.
 * Pace curves and used races are saved to `data/pace_curves.csv` and `data/used_races.csv` so they reload automatically on restart.
 * Output: ![pace_curve](https://github.com/danielissing/race-predictor/blob/main/images/pace_curve.png)
 
@@ -151,14 +157,14 @@ RACE_PREDICTOR_DEBUG=1 streamlit run app.py
 
 1. **Pace curves**: For each grade bin (e.g., -12% to -8%), the app looks at your **race streams** and estimates a **median running speed** and a variability factor. It then corrects these median speeds in order to normalize the values to sea level (since you're typically slower when running in high altitude).
 2. **Course breakdown**: The GPX is segmented by your aid stations; within each leg, we compute how many meters fall into each grade bin. We also add a penalty (if needed) for each bin to account for the altitude of this particular race.
-3. **Fatigue & conditions**: A fatigue curve makes later legs a bit slower and ensures that overall pace drops for races much longer than your median distance. For very long efforts, it also builds in appropriate breaks for aid station time and rest/sleep (currently modeled post hoc to fit the data). A "race day conditions" knob allows to slightly adjust ETAs globally.
-4. **Monte Carlo simulation**: We sample speeds around the medians (correlated across bins for “good/bad day” effects) to produce **P10/P90** ETAs.
+3. **Fatigue & conditions**: A learned fatigue slope (from velocity drift in your long races) makes later legs progressively slower. For very long efforts, the model also adds rest/sleep time via a learned rest model. A "race day conditions" knob allows slight global adjustment.
+4. **Monte Carlo simulation**: We sample speeds around the medians (correlated across bins for "good/bad day" effects) to produce **P10/P90** ETAs. The width of the confidence band is calibrated from your past race prediction errors so that it covers ~80% of outcomes.
 
-The [config.py](https://github.com/danielissing/race-predictor/blob/main/config.py) file allows you to fine-tune many parameters to improve predictions. The most important ones are:
+The [config.py](https://github.com/danielissing/race-predictor/blob/main/config.py) file contains fallback defaults and tunable parameters. The most important ones are:
 
 * `MAX_RIEGEL_K`: Upper bound for how much slower you'll run in later stages of a race.
 * `ULTRA_START_HOURS`: After how many hours the code will start adding rest/sleep time.
-* `FATIGUE_SLOPE` and `REST_SLOPE`: Determine how quickly additional time will be added as the race progresses.
+* `FATIGUE_SLOPE`: Default fatigue rate (overridden by the learned value when enough data is available).
 
 ---
 
@@ -199,7 +205,9 @@ The `--csv` flag writes one row per validated race to `data/validation/results.c
 * **Streams cache**: `data/strava_cache/`
 * **Pace curves**: `data/pace_curves.csv`
 * **Used races**: `data/used_races.csv`
-* **Last ETAs shown**: kept in Streamlit `session_state` (so downloads don’t recompute)
+* **Model metadata**: `data/model_meta.json` (Riegel k, rest model, fatigue slope, variance scale)
+* **Excluded races**: `data/excluded_races.csv` (user-excluded race IDs)
+* **Last ETAs shown**: kept in Streamlit `session_state` (so downloads don't recompute)
 
 > If you change Strava Client Secret or revoke the app, delete `data/strava_tokens.json` and reconnect.
 

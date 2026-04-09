@@ -185,6 +185,16 @@ def apply_distance_scaling(base_times, course, pace_model):
         # Road racing is more predictable, k closer to 1.0
         k = 1.0 + (k - 1.0) * config.ROAD_K_DAMPEN  #
 
+    # Dampen Riegel for ultra distances: k was fit from elapsed times
+    # (which include fatigue + rest), but we model those explicitly for ultras.
+    # Without dampening, Riegel + fatigue + rest triple-count the slowdown.
+    base_finish_hours = base_times[-1] / config.SECONDS_PER_HOUR
+    if base_finish_hours > config.ULTRA_START_HOURS:
+        ultra_hours = base_finish_hours - config.ULTRA_START_HOURS
+        overlap_dampen = max(0.25, 1.0 - ultra_hours / 50.0)
+        k = 1.0 + (k - 1.0) * overlap_dampen
+        log.debug(f"Ultra overlap dampen: {overlap_dampen:.2f}, k adjusted to {k:.3f}")
+
     # Reference distance (what your pace curves are calibrated to)
     ref_distance = pace_model.ref_distance_km if pace_model.ref_distance_km else config.DEFAULT_DISTANCE_KM
 
@@ -303,16 +313,21 @@ def apply_distance_scaling(base_times, course, pace_model):
     return np.array(scaled_times)
 
 
-def apply_ultra_adjustments(times, course):
+def apply_ultra_adjustments(times, course, pace_model=None):
     """
-    Apply ultra adjustments using config functions for cleaner code.
+    Apply ultra adjustments: fatigue (multiplicative) + rest (additive, learned).
+
+    Uses the learned rest model from pace_model when available,
+    otherwise falls back to config defaults.
 
     Args:
-        times: Array of checkpoint times
-        course_km: Total race distance
+        times: Array of checkpoint times (after distance scaling)
+        course: Course object
+        pace_model: PaceModel with rest model (optional)
 
     Returns:
-        Tuple of (adjusted_times, metadata_dict)
+        Tuple of (adjusted_times, running_only_times, metadata_dict)
+        running_only_times has fatigue but no rest — used for arrival/departure split.
     """
     finish_hours = times[-1] / config.SECONDS_PER_HOUR
     course_km = course.total_km
@@ -324,96 +339,83 @@ def apply_ultra_adjustments(times, course):
     # No adjustments for short races
     if finish_hours <= config.ULTRA_START_HOURS:
         log.debug(f"No ultra adjustments needed (< {config.ULTRA_START_HOURS} hours)")
-        return times, {
+        return times, times.copy(), {
             "ultra_adjusted": False,
             "slow_factor_finish": 1.0,
             "rest_added_finish_s": 0.0,
         }
 
-    adjusted = times.copy()
+    # --- Fatigue (multiplicative, learned or default) ---
+    fatigue_slope = pace_model.fatigue_slope if pace_model is not None else config.FATIGUE_SLOPE
+    fatigue_factor = 1.0 + fatigue_slope * (finish_hours - config.ULTRA_START_HOURS)
 
-    # Get fatigue and rest from config functions
-    fatigue_factor = 1.0 + config.FATIGUE_SLOPE * (finish_hours - config.ULTRA_START_HOURS)  # (1.0 = no fatigue). Function derived empirically to match race time data
-    total_rest_h = config.REST_SLOPE * (finish_hours - config.ULTRA_START_HOURS)  # start adding rest for courses > 5h.
-    total_rest_s = total_rest_h * config.SECONDS_PER_HOUR
+    log.debug(f"Fatigue factor at finish: {fatigue_factor:.3f}x")
 
-    log.debug(f"Base fatigue factor: {fatigue_factor:.3f}x")
-    log.debug(f"Base rest time: {format_time(total_rest_s)}")
-
-    # Apply special adjustments for ultra races
-    if course_km > config.EXTREME_DISTANCE_KM:
-        total_rest_s *= config.EXTREME_DISTANCE_FACTOR
-        fatigue_factor *= config.EXTREME_FATIGUE_FACTOR
-        log.debug(f"Extreme distance adjustments applied (>{config.EXTREME_DISTANCE_KM}km)")
-
-    log.debug(f"Final fatigue factor at finish: {fatigue_factor:.3f}x")
-    log.debug(f"Total rest time for entire race: {format_time(total_rest_s)}")
-
-    # Apply adjustments progressively through the race
-    adjusted = []
-
-    # Calculate incremental times (time for each leg)
+    # --- Rest (additive, learned model) ---
+    # First compute running-only time with fatigue to get running_hours estimate
     incremental_times = np.diff(np.concatenate([[0], times]))
+    n_legs = len(times)
 
-    for i in range(len(times)):
-        progress = (i + 1) / len(times)
-        distance_km = course.leg_ends_x[i] * course.total_km
+    # Build running-only cumulative times (with fatigue, no rest)
+    running_only = []
+    running_cumulative = 0.0
+    for i in range(n_legs):
+        leg_progress = (i + 1) / n_legs
+        leg_fatigue = 1.0 + (fatigue_factor - 1.0) * (leg_progress ** 1.5)
+        running_cumulative += incremental_times[i] * leg_fatigue
+        running_only.append(running_cumulative)
+    running_only = np.array(running_only)
 
-        # FATIGUE: Builds progressively, but only affects running time
-        # Use an S-curve that starts slow
-        fatigue_progress = progress ** 1.5  # More gradual than linear
-        current_fatigue = 1.0 + (fatigue_factor - 1.0) * fatigue_progress
+    # Predict total rest from running time
+    running_finish_hours = running_only[-1] / config.SECONDS_PER_HOUR
+    if pace_model is not None:
+        rest_fraction = pace_model.predict_rest_fraction(running_finish_hours)
+        rest_source = "learned" if pace_model.rest_n_races >= config.REST_MIN_RACES_FOR_FIT else "fallback"
+    else:
+        import math
+        a, b = config.REST_FALLBACK_A, config.REST_FALLBACK_B
+        rest_fraction = max(0.0, min(a * math.log(max(running_finish_hours, 0.1)) + b, config.REST_MAX_FRACTION))
+        rest_source = "fallback"
 
-        # REST: Distributed based on distance and effort
-        # Minimal rest early, more rest later in the race
-        if distance_km <= config.SHORT_DISTANCE_KM:
-            # First part: minimal rest (maybe a quick water stop)
-            rest_fraction = config.SHORT_REST_PCT
-        elif distance_km <= config.DEFAULT_DISTANCE_KM:
-            rest_fraction = config.MED_REST_PCT
-        elif distance_km <= config.MEDIUM_DISTANCE_KM:
-            # 50-100k: moderate rest
-            rest_fraction = config.LONG_REST_PCT
+    # rest_fraction is fraction of elapsed time; elapsed = running + rest
+    # rest_frac = rest / (running + rest) => rest = running * rest_frac / (1 - rest_frac)
+    if rest_fraction >= 1.0:
+        rest_fraction = config.REST_MAX_FRACTION
+    total_rest_s = running_only[-1] * rest_fraction / max(1.0 - rest_fraction, 0.01)
+
+    log.debug(f"Rest model ({rest_source}): fraction={rest_fraction:.3f}, total={format_time(total_rest_s)}")
+
+    # --- Distribute rest using CDF ---
+    adjusted = []
+    for i in range(n_legs):
+        progress = course.leg_ends_x[i]  # normalized distance [0,1]
+        if pace_model is not None:
+            cdf_val = pace_model.rest_cdf(progress)
         else:
-            # Beyond 100k: rest scales with distance
-            # Use a curve that gives more rest later
-            rest_progress = (distance_km - 100) / (course.total_km - 100) if course.total_km > 100 else 1
-            rest_fraction = config.LONG_REST_PCT + (1-config.LONG_REST_PCT) * (rest_progress ** 0.8)
+            cdf_val = progress ** config.REST_FALLBACK_BETA
 
-        # Calculate rest time up to this checkpoint
-        checkpoint_rest = total_rest_s * rest_fraction
-
-        # Apply fatigue to the running time only, then add rest
-        # Sum of all leg times with fatigue applied
-        running_time = 0
-        for j in range(i + 1):
-            # Apply progressive fatigue to each leg
-            leg_progress = (j + 1) / len(times)
-            leg_fatigue = 1.0 + (fatigue_factor - 1.0) * (leg_progress ** 1.5)
-            running_time += incremental_times[j] * leg_fatigue
-
-        adjusted_time = running_time + checkpoint_rest
+        checkpoint_rest = total_rest_s * cdf_val
+        adjusted_time = running_only[i] + checkpoint_rest
         adjusted.append(adjusted_time)
 
-        # Debug output for key checkpoints
-        if i < 3 or (9 <= distance_km <= 11) or i == len(times) - 1:
+        distance_km = progress * course.total_km
+        if i < 3 or (9 <= distance_km <= 11) or i == n_legs - 1:
             log.debug(f"  Checkpoint {i}: {distance_km:.1f}km")
-            log.debug(f"    Running fatigue: {current_fatigue:.3f}x")
-            log.debug(f"    Rest time at this checkpoint: {format_time(checkpoint_rest)}")
-            log.debug(f"    Time: {format_time(times[i])} -> {format_time(adjusted_time)}")
-            log.debug(f"    Net change: +{format_time(adjusted_time - times[i])}")
+            log.debug(f"    Running: {format_time(running_only[i])}, Rest: {format_time(checkpoint_rest)}")
+            log.debug(f"    Total: {format_time(adjusted_time)}")
 
     log.debug(f"Ultra-adjusted finish time: {format_time(adjusted[-1])}")
-    log.debug(f"Total time added: {format_time(adjusted[-1] - times[-1])}")
 
     metadata = {
         "ultra_adjusted": True,
         "slow_factor_finish": float(fatigue_factor),
         "rest_added_finish_s": float(total_rest_s),
         "finish_hours": float(finish_hours),
+        "rest_fraction": float(rest_fraction),
+        "rest_source": rest_source,
     }
 
-    return np.array(adjusted), metadata
+    return np.array(adjusted), running_only, metadata
 
 
 def _generate_day_factors(sims, rel_var, tail_cap):
@@ -467,16 +469,29 @@ def _generate_day_factors(sims, rel_var, tail_cap):
     return day_factors
 
 
-def _simulate_with_conditions(baseline_times, raw_base_times, course, speeds, sigmas, conditions, sims=config.MC_SIMS):
-    # Per-leg scalers: how much each leg should be stretched by fatigue+rest+distance effects
+def _simulate_with_conditions(baseline_times, raw_base_times, running_only_times, course, speeds, sigmas, conditions, pace_model=None, sims=config.MC_SIMS):
+    """Monte Carlo simulation with separate running/rest variance.
+
+    running_only_times: cumulative running times (fatigue applied, no rest).
+    baseline_times: cumulative total times (running + rest).
+    The difference gives rest per leg, which is varied via day_factor coupling.
+    """
+    # Separate running and rest increments
     raw_incr = np.diff(np.hstack([0.0, raw_base_times]))
-    base_incr = np.diff(np.hstack([0.0, baseline_times]))
-    leg_scale = np.divide(base_incr, np.maximum(raw_incr, config.EPSILON))
+    running_incr = np.diff(np.hstack([0.0, running_only_times]))
+    rest_incr = np.diff(np.hstack([0.0, baseline_times])) - running_incr
+
+    # Per-leg running scale: how much distance scaling + fatigue stretch running time
+    running_scale = np.divide(running_incr, np.maximum(raw_incr, config.EPSILON))
 
     # Road vs trail + variance sizing
     is_road = _is_flat_race(course)
     race_hours = baseline_times[-1] / 3600.0
     rel_var = _get_relative_variance(race_hours, is_road)
+
+    # Apply learned variance scale if available
+    if pace_model is not None:
+        rel_var *= pace_model.variance_scale
 
     base = config.TAILCAP_BASE_ROAD if is_road else config.TAILCAP_BASE_TRAIL
     k_tail = config.TAILCAP_K_ROAD if is_road else config.TAILCAP_K_TRAIL
@@ -503,15 +518,20 @@ def _simulate_with_conditions(baseline_times, raw_base_times, course, speeds, si
     legs_matrix = np.array(course.legs_meters)  # (n_legs, n_bins)
 
     # Raw leg times: for each sim and leg, sum(leg_dist / varied_speed) over bins
-    # (1, n_legs, n_bins) / (sims, 1, n_bins) → sum over bins → (sims, n_legs)
     raw_leg_times = np.sum(
         legs_matrix[None, :, :] / varied_speeds[:, None, :],
         axis=2
     )
 
-    # Apply per-leg scaling (fatigue+rest+distance) and day factor, then cumsum
-    scaled_leg_times = raw_leg_times * leg_scale[None, :] * total_factors[:, None]
-    samples = np.cumsum(scaled_leg_times, axis=1)  # (sims, n_legs)
+    # Apply per-leg running scaling and day factor
+    varied_running = raw_leg_times * running_scale[None, :] * total_factors[:, None]
+
+    # Vary rest via day-factor coupling: worse day = more rest
+    coupling = config.REST_DAY_FACTOR_COUPLING
+    rest_factors = 1.0 + coupling * (total_factors - 1.0)  # (sims,)
+    varied_rest = rest_incr[None, :] * np.maximum(rest_factors[:, None], 0.0)
+
+    samples = np.cumsum(varied_running + varied_rest, axis=1)  # (sims, n_legs)
 
     return (np.percentile(samples, 10, axis=0),
             np.percentile(samples, 50, axis=0),
@@ -555,7 +575,9 @@ def run_prediction_simulation(course, pace_model, conditions=0):
     scaled_times = apply_distance_scaling(base_times, course, pace_model)
 
     # Step 4: Apply ultra adjustments if needed (>6 hours)
-    adjusted_times, ultra_meta = apply_ultra_adjustments(scaled_times, course)
+    adjusted_times, running_only_times, ultra_meta = apply_ultra_adjustments(
+        scaled_times, course, pace_model
+    )
 
     log.debug("=" * 60)
     log.debug("STAGE 4: MONTE CARLO SIMULATION")
@@ -566,7 +588,9 @@ def run_prediction_simulation(course, pace_model, conditions=0):
     p10, p50, p90 = _simulate_with_conditions(
         adjusted_times,  # ultra-adjusted baseline (fatigue + rest)
         base_times,  # raw speed baseline (pre-scaling)
-        course, speeds, pace_model.sigmas, conditions, sims=config.MC_SIMS
+        running_only_times,  # fatigue only, no rest
+        course, speeds, pace_model.sigmas, conditions,
+        pace_model=pace_model, sims=config.MC_SIMS
     )
 
     log.debug("\n" + "=" * 60)
@@ -610,6 +634,7 @@ def run_prediction_simulation(course, pace_model, conditions=0):
         "p10": p10,
         "p50": adjusted_times,
         "p90": p90,
+        "running_only_p50": running_only_times,
         "metadata": metadata
     }
 

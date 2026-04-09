@@ -68,3 +68,37 @@ def forget_app_creds(app_credits_path: str):
         os.remove(app_credits_path)
     except FileNotFoundError:
         pass
+
+
+def load_excluded_race_ids() -> set:
+    """Load set of race IDs the user has chosen to exclude."""
+    path = config.EXCLUDED_RACES_PATH
+    if not os.path.exists(path):
+        return set()
+    try:
+        df = pd.read_csv(path)
+        return set(df["id"].astype(str))
+    except Exception:
+        return set()
+
+
+def save_excluded_race_ids(excluded_ids: set):
+    """Persist the set of excluded race IDs to CSV."""
+    Path(config.DATA_DIR).mkdir(exist_ok=True)
+    df = pd.DataFrame({"id": sorted(excluded_ids)})
+    df.to_csv(config.EXCLUDED_RACES_PATH, index=False)
+
+
+def load_streams(race_id) -> dict | None:
+    """Load cached streams JSON. Returns None if missing or empty."""
+    path = os.path.join(config.CACHE_DIR, f"streams_{race_id}.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        if not data:
+            return None
+        return data
+    except (json.JSONDecodeError, IOError):
+        return None

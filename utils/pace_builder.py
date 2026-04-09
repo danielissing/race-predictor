@@ -3,13 +3,17 @@ Build personalized pace curves from historical race data.
 Integrates with Strava to analyze past performances.
 """
 # packages
+import logging
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, List, Tuple
 #local imports
 from utils.strava import get_activity_streams, is_run, is_race
 from utils.performance import altitude_impairment_multiplicative, recency_weight, weighted_percentile
+from utils.persistence import load_streams
 import config
+
+log = logging.getLogger(__name__)
 
 
 def build_pace_curves_from_races(
@@ -18,6 +22,7 @@ def build_pace_curves_from_races(
         bins: list,
         max_activities: int = config.MAX_ACTIVITIES,
         recency_mode: str = "mild",
+        excluded_ids: set | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
     """
     Build personalized pace curves from Strava race history.
@@ -51,7 +56,7 @@ def build_pace_curves_from_races(
     weight_samples_by_bin = [[] for _ in range(n_bins)]
 
     # Filter to only race activities
-    races = _filter_and_deduplicate_races(activities)
+    races = _filter_and_deduplicate_races(activities, excluded_ids=excluded_ids)
 
     used_race_metadata = []
 
@@ -65,6 +70,13 @@ def build_pace_curves_from_races(
         if race_data:
             used_race_metadata.append(race_data)
 
+    # Collect rest data and fatigue data from processed races (strip from metadata before DataFrame)
+    rest_data_list = [r["_rest_data"] for r in used_race_metadata if r.get("_rest_data")]
+    fatigue_data_list = [r["_fatigue_data"] for r in used_race_metadata if r.get("_fatigue_data")]
+    for r in used_race_metadata:
+        r.pop("_rest_data", None)
+        r.pop("_fatigue_data", None)
+
     # Create DataFrames
     used_races_df = _create_used_races_dataframe(used_race_metadata)
     curves_df = _create_pace_curves_dataframe(
@@ -74,7 +86,13 @@ def build_pace_curves_from_races(
     # Fit personal Riegel exponent
     riegel_k, ref_distance_km, ref_time_s = _fit_riegel_exponent(used_races_df)
 
-    # Build metadata dictionary
+    # Fit rest model from stream data
+    rest_a, rest_b, rest_beta, rest_n = _fit_rest_model(rest_data_list)
+
+    # Fit fatigue slope from stream data
+    fatigue_slope, fatigue_n = _fit_fatigue_slope(fatigue_data_list)
+
+    # Build metadata dictionary (before variance calibration)
     meta = {
         "alpha": config.ELEVATION_IMPAIRMENT,
         "recency_mode": recency_mode,
@@ -82,13 +100,349 @@ def build_pace_curves_from_races(
         "ref_distance_km": float(ref_distance_km) if ref_distance_km else None,
         "ref_time_s": float(ref_time_s) if ref_time_s else None,
         "n_races": int(len(used_races_df)) if used_races_df is not None else 0,
+        "rest_model_a": float(rest_a),
+        "rest_model_b": float(rest_b),
+        "rest_distribution_beta": float(rest_beta),
+        "rest_n_races": int(rest_n),
+        "fatigue_slope": float(fatigue_slope),
+        "fatigue_n_races": int(fatigue_n),
     }
+
+    # Calibrate variance scale from leave-none-out predictions
+    variance_scale, variance_n = _calibrate_variance_scale(used_races_df, curves_df, meta)
+    meta["variance_scale"] = float(variance_scale)
+    meta["variance_n_races"] = int(variance_n)
 
     return curves_df, used_races_df, meta
 
 
-def _filter_and_deduplicate_races(activities: List[Dict]) -> List[Dict]:
-    """Filter to only races and remove duplicates."""
+def _extract_rest_data(streams: Dict, elapsed_time_s: float, distance_km: float) -> Dict[str, Any] | None:
+    """Extract rest statistics from a race's stream data.
+
+    Uses velocity_smooth to identify stopped periods and computes:
+    - rest_fraction: total stopped time / elapsed time
+    - rest_cdf_points: cumulative rest distribution at 10 equidistant checkpoints
+
+    Returns None if the data quality is too low.
+    """
+    time_data = streams.get("time", {}).get("data")
+    vel_data = streams.get("velocity_smooth", {}).get("data")
+    dist_data = streams.get("distance", {}).get("data")
+
+    if not time_data or not vel_data or not dist_data:
+        return None
+    if len(time_data) < 10:
+        return None
+
+    time_arr = np.array(time_data, dtype=float)
+    vel_arr = np.array(vel_data, dtype=float)
+    dist_arr = np.array(dist_data, dtype=float)
+
+    # Quality check: average sampling interval
+    total_duration = time_arr[-1] - time_arr[0]
+    if total_duration <= 0:
+        return None
+    avg_interval = total_duration / len(time_arr)
+    if avg_interval > config.REST_MAX_SAMPLE_INTERVAL:
+        return None
+
+    # Quality check: elapsed time must be long enough
+    elapsed_hours = elapsed_time_s / config.SECONDS_PER_HOUR
+    if elapsed_hours < config.REST_MIN_ELAPSED_HOURS:
+        return None
+
+    # Quality check: moving speed sanity (exclude corrupted velocity data)
+    dt = np.diff(time_arr)
+    dd = np.diff(dist_arr)
+    moving_mask = vel_arr[1:] >= config.REST_VELOCITY_THRESHOLD
+    moving_time = np.sum(dt[moving_mask])
+    moving_dist = np.sum(dd[moving_mask])
+    if moving_time > 0:
+        moving_speed_kmh = (moving_dist / moving_time) * 3.6
+        if moving_speed_kmh > config.REST_MAX_MOVING_SPEED_KMH:
+            return None
+
+    # Compute stopped time per interval
+    stopped_mask = vel_arr[1:] < config.REST_VELOCITY_THRESHOLD
+    stopped_time = np.sum(dt[stopped_mask])
+    rest_fraction = stopped_time / total_duration
+
+    # Compute rest CDF at 10 equally-spaced distance checkpoints
+    total_dist = dist_arr[-1]
+    if total_dist <= 0:
+        return None
+
+    n_checkpoints = 10
+    checkpoint_dists = np.linspace(total_dist / n_checkpoints, total_dist, n_checkpoints)
+    cumulative_rest = np.cumsum(dt * stopped_mask)
+    # Map each checkpoint distance to cumulative rest
+    rest_cdf = np.zeros(n_checkpoints)
+    for ci, cd in enumerate(checkpoint_dists):
+        idx = np.searchsorted(dist_arr[1:], cd, side="right")
+        idx = min(idx, len(cumulative_rest) - 1)
+        rest_cdf[ci] = cumulative_rest[idx]
+
+    # Normalize CDF to [0, 1]
+    if rest_cdf[-1] > 0:
+        rest_cdf = rest_cdf / rest_cdf[-1]
+    else:
+        rest_cdf = np.linspace(0, 1, n_checkpoints)
+
+    running_hours = (total_duration - stopped_time) / config.SECONDS_PER_HOUR
+
+    return {
+        "rest_fraction": float(rest_fraction),
+        "rest_cdf_points": rest_cdf.tolist(),
+        "elapsed_hours": float(elapsed_hours),
+        "running_hours": float(running_hours),
+        "sample_interval_s": float(avg_interval),
+    }
+
+
+def _fit_rest_model(rest_data_list: List[Dict]) -> Tuple[float, float, float, int]:
+    """Fit rest model parameters from extracted rest data.
+
+    Fits:
+    - rest_fraction = a * ln(running_hours) + b  (log-linear)
+    - rest CDF = x^beta  (power-law distribution)
+
+    Returns (a, b, beta, n_qualifying_races).
+    Falls back to config defaults if fewer than REST_MIN_RACES_FOR_FIT qualifying races.
+    """
+    if not rest_data_list:
+        return config.REST_FALLBACK_A, config.REST_FALLBACK_B, config.REST_FALLBACK_BETA, 0
+
+    qualifying = [d for d in rest_data_list
+                  if d["running_hours"] > 0 and d["rest_fraction"] > 0]
+
+    if len(qualifying) < config.REST_MIN_RACES_FOR_FIT:
+        return config.REST_FALLBACK_A, config.REST_FALLBACK_B, config.REST_FALLBACK_BETA, len(qualifying)
+
+    # Fit rest_fraction = a * ln(running_hours) + b
+    ln_hours = np.array([np.log(d["running_hours"]) for d in qualifying])
+    fractions = np.array([d["rest_fraction"] for d in qualifying])
+
+    n = len(qualifying)
+    sx = np.sum(ln_hours)
+    sy = np.sum(fractions)
+    sxx = np.sum(ln_hours ** 2)
+    sxy = np.sum(ln_hours * fractions)
+    denom = n * sxx - sx * sx
+    if abs(denom) < config.EPSILON:
+        a, b = config.REST_FALLBACK_A, config.REST_FALLBACK_B
+    else:
+        a = float((n * sxy - sx * sy) / denom)
+        b = float((sy - a * sx) / n)
+
+    # Fit distribution beta from averaged CDFs via log-log regression on F(x) = x^beta
+    # x = normalized progress [0.1, 0.2, ..., 1.0], F(x) = averaged CDF value
+    x_points = np.linspace(0.1, 1.0, 10)
+    avg_cdf = np.mean([d["rest_cdf_points"] for d in qualifying], axis=0)
+
+    # Filter to points where both x and F(x) are > 0 for log-log
+    valid = (x_points > 0) & (avg_cdf > 0) & (avg_cdf < 1)
+    if np.sum(valid) >= 3:
+        log_x = np.log(x_points[valid])
+        log_f = np.log(avg_cdf[valid])
+        # beta = slope of log(F) vs log(x)
+        n_v = np.sum(valid)
+        sx_v = np.sum(log_x)
+        sy_v = np.sum(log_f)
+        sxx_v = np.sum(log_x ** 2)
+        sxy_v = np.sum(log_x * log_f)
+        denom_v = n_v * sxx_v - sx_v * sx_v
+        if abs(denom_v) > config.EPSILON:
+            beta = float((n_v * sxy_v - sx_v * sy_v) / denom_v)
+            beta = max(0.5, min(beta, 5.0))  # sanity bounds
+        else:
+            beta = config.REST_FALLBACK_BETA
+    else:
+        beta = config.REST_FALLBACK_BETA
+
+    log.info("Rest model fit: a=%.4f, b=%.4f, beta=%.2f from %d races", a, b, beta, len(qualifying))
+    return a, b, beta, len(qualifying)
+
+
+def _extract_fatigue_data(streams: Dict, elapsed_time_s: float) -> Dict[str, Any] | None:
+    """Extract fatigue drift from a race's stream data.
+
+    For races >2h, compare median velocity in the first quartile vs the last
+    quartile (restricted to moderate grades -5% to +5%) to get a drift ratio.
+
+    Returns dict with drift_ratio and elapsed_hours, or None if not usable.
+    """
+    elapsed_hours = elapsed_time_s / config.SECONDS_PER_HOUR
+    if elapsed_hours < config.REST_MIN_ELAPSED_HOURS:
+        return None
+
+    vel_data = streams.get("velocity_smooth", {}).get("data")
+    dist_data = streams.get("distance", {}).get("data")
+    grade_data = streams.get("grade_smooth", {}).get("data")
+
+    if not vel_data or not dist_data or not grade_data:
+        return None
+    if len(vel_data) < 20:
+        return None
+
+    vel = np.array(vel_data, dtype=float)
+    dist = np.array(dist_data, dtype=float)
+    grade = np.array(grade_data, dtype=float)
+
+    total_dist = dist[-1]
+    if total_dist <= 0:
+        return None
+
+    # Only consider moderate grades (-5% to +5%) to isolate fatigue from terrain
+    flat_mask = (np.abs(grade) <= 5.0) & (vel > 0.5)
+
+    q1_mask = flat_mask & (dist < total_dist * 0.25)
+    q4_mask = flat_mask & (dist > total_dist * 0.75)
+
+    if np.sum(q1_mask) < 5 or np.sum(q4_mask) < 5:
+        return None
+
+    median_v_q1 = float(np.median(vel[q1_mask]))
+    median_v_q4 = float(np.median(vel[q4_mask]))
+
+    if median_v_q1 <= 0:
+        return None
+
+    drift_ratio = median_v_q4 / median_v_q1  # <1 means slowed down
+
+    return {
+        "drift_ratio": drift_ratio,
+        "elapsed_hours": elapsed_hours,
+    }
+
+
+def _fit_fatigue_slope(fatigue_data_list: List[Dict]) -> Tuple[float, int]:
+    """Fit fatigue slope from drift data.
+
+    Model: drift_ratio = 1 + slope * (hours - ULTRA_START_HOURS)
+    slope is negative (runner gets slower).
+
+    We convert this to the fatigue_slope used by prediction.py which represents
+    the *slowdown* factor: fatigue = 1 + fatigue_slope * (hours - threshold).
+    Since drift_ratio < 1 means slower, fatigue_slope = -slope.
+
+    Minimum 3 qualifying races, else fall back to config.FATIGUE_SLOPE.
+    """
+    qualifying = [d for d in fatigue_data_list
+                  if d["elapsed_hours"] > config.ULTRA_START_HOURS]
+
+    if len(qualifying) < 3:
+        return config.FATIGUE_SLOPE, len(qualifying)
+
+    hours = np.array([d["elapsed_hours"] for d in qualifying])
+    drift = np.array([d["drift_ratio"] for d in qualifying])
+
+    # Weighted least squares: weight longer races more
+    weights = hours / hours.sum()
+
+    x = hours - config.ULTRA_START_HOURS
+    # drift_ratio = 1 + slope * x  =>  (drift_ratio - 1) = slope * x
+    y = drift - 1.0
+
+    # Weighted regression through origin: slope = sum(w*x*y) / sum(w*x^2)
+    denom = np.sum(weights * x * x)
+    if denom < config.EPSILON:
+        return config.FATIGUE_SLOPE, len(qualifying)
+
+    slope = float(np.sum(weights * x * y) / denom)
+
+    # slope is typically negative (runner slows). fatigue_slope = -slope (positive = slowdown)
+    fatigue_slope = max(0.0, -slope)
+
+    # Sanity bounds: between 0 and 5x the default
+    fatigue_slope = min(fatigue_slope, config.FATIGUE_SLOPE * 5)
+
+    log.info("Fatigue slope fit: %.5f from %d races (raw slope=%.5f)",
+             fatigue_slope, len(qualifying), slope)
+
+    return fatigue_slope, len(qualifying)
+
+
+def _calibrate_variance_scale(
+        used_races_df: pd.DataFrame,
+        pace_df: pd.DataFrame,
+        meta: dict,
+) -> Tuple[float, int]:
+    """Calibrate variance scale by predicting each used race and computing z-scores.
+
+    For each race with cached streams, build a StreamCourse, run the prediction,
+    and compute z = (actual - p50) / ((p90 - p10) / 2.56).
+    Then find variance_scale = percentile(|z|, 80) / 1.28 — the multiplier
+    that would make the band wide enough to cover 80% of past races.
+
+    Returns (variance_scale, n_races_tested).
+    """
+    from models import PaceModel, StreamCourse
+    from utils.prediction import run_prediction_simulation
+
+    if used_races_df is None or used_races_df.empty:
+        return 1.0, 0
+
+    # Build a temporary PaceModel for predictions
+    temp_model = PaceModel(pace_df, used_races_df, meta)
+
+    z_scores = []
+    for _, row in used_races_df.iterrows():
+        race_id = str(row["id"])
+        streams = load_streams(race_id)
+        if streams is None:
+            continue
+
+        dist_data = streams.get("distance", {}).get("data")
+        alt_data = streams.get("altitude", {}).get("data")
+        if not dist_data or not alt_data or len(dist_data) < 10:
+            continue
+
+        try:
+            course = StreamCourse(dist_data, alt_data)
+        except Exception:
+            continue
+
+        if not course.legs_meters:
+            continue
+
+        try:
+            pred = run_prediction_simulation(course, temp_model, conditions=0)
+        except Exception:
+            continue
+
+        actual = float(row["elapsed_time_s"])
+        p10 = float(pred["p10"][-1])
+        p50 = float(pred["p50"][-1])
+        p90 = float(pred["p90"][-1])
+
+        band_width = p90 - p10
+        if band_width < config.EPSILON:
+            continue
+
+        z = (actual - p50) / (band_width / 2.56)
+        z_scores.append(abs(z))
+
+    if len(z_scores) < 3:
+        return 1.0, len(z_scores)
+
+    z_arr = np.array(z_scores)
+    # The 80th percentile of |z| should equal 1.28 for proper 80% coverage
+    p80_z = float(np.percentile(z_arr, 80))
+    if p80_z < config.EPSILON:
+        return 1.0, len(z_scores)
+
+    variance_scale = p80_z / 1.28
+    # Sanity bounds: between 0.5 and 3.0
+    variance_scale = max(0.5, min(variance_scale, 3.0))
+
+    log.info("Variance scale calibrated: %.3f from %d races (p80|z|=%.3f)",
+             variance_scale, len(z_scores), p80_z)
+
+    return variance_scale, len(z_scores)
+
+
+def _filter_and_deduplicate_races(activities: List[Dict], excluded_ids: set | None = None) -> List[Dict]:
+    """Filter to only races, remove duplicates, and drop user-excluded races."""
     races = [a for a in activities if is_run(a) and is_race(a)]
 
     # Deduplicate by activity ID
@@ -98,6 +452,9 @@ def _filter_and_deduplicate_races(activities: List[Dict]) -> List[Dict]:
         race_id = race.get("id")
         if race_id not in seen:
             seen.add(race_id)
+            # Skip user-excluded races
+            if excluded_ids and str(race_id) in excluded_ids:
+                continue
             unique_races.append(race)
 
     return unique_races
@@ -148,15 +505,25 @@ def _process_single_race(
     if not used_any:
         return None
 
+    # Extract rest data from the same streams
+    elapsed_time_s = int(activity.get("elapsed_time") or 0)
+    distance_km = round(activity.get("distance", 0) / 1000.0, 2)
+    rest_data = _extract_rest_data(streams, elapsed_time_s, distance_km)
+
+    # Extract fatigue data from the same streams
+    fatigue_data = _extract_fatigue_data(streams, elapsed_time_s)
+
     # Return race metadata
     return {
         "id": activity_id,
         "name": activity.get("name", "(unnamed)"),
         "date": (activity.get("start_date", "") or "")[:10],
-        "distance_km": round(activity.get("distance", 0) / 1000.0, 2),
-        "elapsed_time_s": int(activity.get("elapsed_time") or 0),
+        "distance_km": distance_km,
+        "elapsed_time_s": elapsed_time_s,
         "median_alt_m": median_alt,
         "weight": round(race_weight, 3),
+        "_rest_data": rest_data,
+        "_fatigue_data": fatigue_data,
     }
 
 
