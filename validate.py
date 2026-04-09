@@ -26,11 +26,9 @@ import numpy as np
 import pandas as pd
 
 import config
-from models import PaceModel
-from utils.course_analysis import distance_by_grade_bins, legs_from_aid_stations
-from utils.elevation import resample_with_grade, segment_stats
+from models import PaceModel, StreamCourse
 from utils.pace_builder import build_pace_curves_from_races
-from utils.persistence import load_pace_model_from_disk
+from utils.persistence import load_pace_model_from_disk, load_streams
 from utils.prediction import run_prediction_simulation
 from utils.strava import is_race, is_run
 
@@ -38,64 +36,8 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# StreamCourse — lightweight Course-like object built from cached stream data
-# ---------------------------------------------------------------------------
-
-class StreamCourse:
-    """Build a Course-like object directly from Strava stream data.
-
-    Reuses the same elevation resampling and grade binning pipeline
-    as the GPX-based Course class, but takes distance + altitude arrays
-    instead of a GPX file.
-
-    The course is treated as a single leg (start -> finish) since for
-    validation we only compare total finish time.
-    """
-
-    def __init__(self, distance_data: list, altitude_data: list):
-        dist_m = np.array(distance_data, dtype=float)
-        alt_m = np.array(altitude_data, dtype=float)
-
-        # Build a DataFrame matching the format expected by resample_with_grade
-        df = pd.DataFrame({"dist_m": dist_m, "ele_m": alt_m})
-        df_res = resample_with_grade(df, step_m=config.STEP_LENGTH, window_m=config.STEP_WINDOW)
-
-        # Course-level stats
-        self.total_km, self.gain_m, self.loss_m, self.min_ele, self.max_ele = segment_stats(df_res)
-        self.median_altitude = float(np.nanmedian(df_res["ele_m"].to_numpy(dtype=float))) if not df_res.empty else 0.0
-
-        # Single leg: the entire course
-        legs_idx = legs_from_aid_stations(df_res, [])  # no aid stations
-        self.legs_meters = []
-        self.leg_end_km = []
-        for a, b in legs_idx:
-            seg = df_res.iloc[a:b + 1]
-            meters = distance_by_grade_bins(seg, config.GRADE_BINS)
-            if meters.sum() > 1.0:
-                self.legs_meters.append(meters)
-                self.leg_end_km.append(float(seg["dist_m"].iloc[-1]) / 1000.0)
-
-        self.leg_ends_x = [min(1.0, km / max(self.total_km, config.EPSILON)) for km in self.leg_end_km]
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def load_streams(race_id) -> dict | None:
-    """Load cached streams JSON. Returns None if missing or empty."""
-    path = os.path.join(config.CACHE_DIR, f"streams_{race_id}.json")
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r") as f:
-            data = json.load(f)
-        if not data:
-            return None
-        return data
-    except (json.JSONDecodeError, IOError):
-        return None
-
 
 def build_activity_dicts(races_df: pd.DataFrame) -> list[dict]:
     """Convert used_races.csv rows into activity dicts for build_pace_curves_from_races."""

@@ -334,8 +334,10 @@ def display_prediction_results():
             st.session_state.prediction_meta = None
             st.rerun()
 
-def display_pace_model_races(pace_model):
-    """Display the races used to build the pace model."""
+def display_pace_model_races(pace_model, excluded_ids: set | None = None):
+    """Display the races used to build the pace model with exclusion toggles."""
+    from utils.persistence import save_excluded_race_ids
+
     st.subheader("Races used for prediction")
 
     if pace_model.used_races is None or len(pace_model.used_races) == 0:
@@ -346,14 +348,36 @@ def display_pace_model_races(pace_model):
     if 'id' in display_df.columns:
         display_df = display_df.drop_duplicates(subset='id')
 
-    cols = ['name', 'date', 'distance_km']
+    if excluded_ids is None:
+        excluded_ids = set()
+
+    # Add Exclude column based on current exclusions
+    display_df["Exclude"] = display_df["id"].astype(str).isin(excluded_ids)
+
+    cols = ['name', 'date', 'distance_km', 'Exclude']
     cols = [c for c in cols if c in display_df.columns]
 
-    if cols:
-        st.dataframe(
-            display_df[cols].sort_values('date', ascending=False).reset_index(drop=True),
-            width="stretch"
-        )
+    if not cols:
+        return
+
+    edited = st.data_editor(
+        display_df[cols].sort_values('date', ascending=False).reset_index(drop=True),
+        disabled=[c for c in cols if c != "Exclude"],
+        width="stretch",
+        key="race_exclusion_editor",
+    )
+
+    if st.button("Save exclusions & rebuild model"):
+        # Map edited rows back to original IDs
+        sorted_df = display_df.sort_values('date', ascending=False).reset_index(drop=True)
+        new_excluded = set()
+        for i, row in edited.iterrows():
+            if row.get("Exclude", False):
+                new_excluded.add(str(sorted_df.iloc[i]["id"]))
+        save_excluded_race_ids(new_excluded)
+        st.session_state["excluded_race_ids"] = new_excluded
+        st.success(f"Saved {len(new_excluded)} exclusion(s). Rebuild your model to apply.")
+        st.rerun()
 
 
 def display_model_metadata(pace_model):
@@ -363,17 +387,34 @@ def display_model_metadata(pace_model):
         rest_n = pace_model.rest_n_races
         rest_status = "Learned from data" if rest_n >= config.REST_MIN_RACES_FOR_FIT else "Using defaults (not enough data)"
 
+        fatigue_n = pace_model.fatigue_n_races
+        fatigue_status = "Learned from data" if fatigue_n >= 3 else "Using defaults (not enough data)"
+
+        variance_n = pace_model.variance_n_races
+        variance_status = "Calibrated from data" if variance_n >= 3 else "Using defaults (not enough data)"
+
+        # Predict rest at a reference point for intuition
+        rest_at_10h = pace_model.predict_rest_fraction(10.0) * 100
+
         st.markdown(f"""
 - **Recency mode:** `{pace_model.meta.get('recency_mode', 'mild')}`
-- **Altitude penalty α:** `{config.ELEVATION_IMPAIRMENT}` per 1000 m above 300 m
+- **Altitude penalty:** `{config.ELEVATION_IMPAIRMENT}` per 1000 m above 300 m
 - **Global Riegel exponent (using data from all races):** `{pace_model.riegel_k:.2f}`
 - **Median race length:** `{pace_model.ref_distance_km or '—'} km`
 - **Races used:** `{pace_model.meta.get('n_races', 0)}`
 
 **Rest model:** {rest_status}
-- a={a:.4f}, b={b:.4f} (rest_frac = a * ln(hours) + b)
-- beta={beta:.2f} (rest distribution exponent)
-- Races with qualifying rest data: {rest_n}
+- Predicted rest at 10h running: `{rest_at_10h:.0f}%` of elapsed time
+- Rest back-loading: `{beta:.1f}` (higher = more rest in the second half)
+- Qualifying races: `{rest_n}`
+
+**Fatigue model:** {fatigue_status}
+- Slowdown per hour (beyond {config.ULTRA_START_HOURS}h): `{pace_model.fatigue_slope:.5f}`
+- Qualifying races: `{fatigue_n}`
+
+**Variance calibration:** {variance_status}
+- CI width scale factor: `{pace_model.variance_scale:.2f}x`
+- Races tested: `{variance_n}`
         """)
 
 

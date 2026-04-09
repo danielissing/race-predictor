@@ -11,6 +11,7 @@ APP_CREDS_PATH = f"{DATA_DIR}/strava_app.json"  # Strava app credentials
 PACE_CURVES_PATH = f"{DATA_DIR}/pace_curves.csv"  # Saved pace model curves
 USED_RACES_PATH = f"{DATA_DIR}/used_races.csv"  # Historical races used in model
 MODEL_META_PATH = f"{DATA_DIR}/model_meta.json"  # Model metadata
+EXCLUDED_RACES_PATH = f"{DATA_DIR}/excluded_races.csv"  # User-excluded race IDs
 TOKENS_PATH = f"{DATA_DIR}/strava_tokens.json"  # OAuth tokens
 CACHE_DIR = f"{DATA_DIR}/strava_cache"  # API response cache
 

@@ -185,6 +185,16 @@ def apply_distance_scaling(base_times, course, pace_model):
         # Road racing is more predictable, k closer to 1.0
         k = 1.0 + (k - 1.0) * config.ROAD_K_DAMPEN  #
 
+    # Dampen Riegel for ultra distances: k was fit from elapsed times
+    # (which include fatigue + rest), but we model those explicitly for ultras.
+    # Without dampening, Riegel + fatigue + rest triple-count the slowdown.
+    base_finish_hours = base_times[-1] / config.SECONDS_PER_HOUR
+    if base_finish_hours > config.ULTRA_START_HOURS:
+        ultra_hours = base_finish_hours - config.ULTRA_START_HOURS
+        overlap_dampen = max(0.25, 1.0 - ultra_hours / 50.0)
+        k = 1.0 + (k - 1.0) * overlap_dampen
+        log.debug(f"Ultra overlap dampen: {overlap_dampen:.2f}, k adjusted to {k:.3f}")
+
     # Reference distance (what your pace curves are calibrated to)
     ref_distance = pace_model.ref_distance_km if pace_model.ref_distance_km else config.DEFAULT_DISTANCE_KM
 
@@ -335,11 +345,9 @@ def apply_ultra_adjustments(times, course, pace_model=None):
             "rest_added_finish_s": 0.0,
         }
 
-    # --- Fatigue (multiplicative, same as before) ---
-    fatigue_factor = 1.0 + config.FATIGUE_SLOPE * (finish_hours - config.ULTRA_START_HOURS)
-
-    if course_km > config.EXTREME_DISTANCE_KM:
-        fatigue_factor *= config.EXTREME_FATIGUE_FACTOR
+    # --- Fatigue (multiplicative, learned or default) ---
+    fatigue_slope = pace_model.fatigue_slope if pace_model is not None else config.FATIGUE_SLOPE
+    fatigue_factor = 1.0 + fatigue_slope * (finish_hours - config.ULTRA_START_HOURS)
 
     log.debug(f"Fatigue factor at finish: {fatigue_factor:.3f}x")
 
@@ -374,10 +382,6 @@ def apply_ultra_adjustments(times, course, pace_model=None):
     if rest_fraction >= 1.0:
         rest_fraction = config.REST_MAX_FRACTION
     total_rest_s = running_only[-1] * rest_fraction / max(1.0 - rest_fraction, 0.01)
-
-    # Extra multiplier for extreme distances
-    if course_km > config.EXTREME_DISTANCE_KM:
-        total_rest_s *= config.EXTREME_DISTANCE_FACTOR
 
     log.debug(f"Rest model ({rest_source}): fraction={rest_fraction:.3f}, total={format_time(total_rest_s)}")
 
@@ -484,6 +488,10 @@ def _simulate_with_conditions(baseline_times, raw_base_times, running_only_times
     is_road = _is_flat_race(course)
     race_hours = baseline_times[-1] / 3600.0
     rel_var = _get_relative_variance(race_hours, is_road)
+
+    # Apply learned variance scale if available
+    if pace_model is not None:
+        rel_var *= pace_model.variance_scale
 
     base = config.TAILCAP_BASE_ROAD if is_road else config.TAILCAP_BASE_TRAIL
     k_tail = config.TAILCAP_K_ROAD if is_road else config.TAILCAP_K_TRAIL

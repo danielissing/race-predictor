@@ -11,7 +11,7 @@ if os.environ.get("RACE_PREDICTOR_DEBUG"):
 
 # Local imports
 from utils.strava import build_auth_url, exchange_code_for_token, ensure_token, list_activities
-from utils.persistence import load_saved_app_creds, save_app_creds, forget_app_creds, load_pace_model_from_disk, save_pace_model_to_disk
+from utils.persistence import load_saved_app_creds, save_app_creds, forget_app_creds, load_pace_model_from_disk, save_pace_model_to_disk, load_excluded_race_ids
 from utils.pace_builder import build_pace_curves_from_races
 from utils.display import (
     display_course_details, display_segments_overview,
@@ -163,6 +163,8 @@ if 'course' not in st.session_state:
     st.session_state.course = None
 if 'eta_results' not in st.session_state:
     st.session_state.eta_results = None
+if 'excluded_race_ids' not in st.session_state:
+    st.session_state.excluded_race_ids = load_excluded_race_ids()
 
 # Handle OAuth callback
 handle_oauth_callback()
@@ -204,7 +206,8 @@ with st.sidebar:
             acts = list_activities(tokens["access_token"])
             pace_df, used_df, meta = build_pace_curves_from_races(
                 tokens["access_token"], acts, config.GRADE_BINS,
-                max_activities=config.MAX_ACTIVITIES, recency_mode=recency_mode
+                max_activities=config.MAX_ACTIVITIES, recency_mode=recency_mode,
+                excluded_ids=st.session_state.excluded_race_ids,
             )
             st.session_state.pace_model = PaceModel(pace_df, used_df, meta)
             save_pace_model_to_disk(st.session_state.pace_model)
@@ -274,4 +277,4 @@ with tab_data:
     else:
         display_pace_curve_analysis(pace_model, course)
         display_model_metadata(pace_model)
-        display_pace_model_races(pace_model)
+        display_pace_model_races(pace_model, excluded_ids=st.session_state.excluded_race_ids)
