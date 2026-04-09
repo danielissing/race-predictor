@@ -170,9 +170,25 @@ A standalone script lets you check how well the model predicts your past race ti
 python validate.py              # quick: use existing model from disk
 python validate.py --loocv      # leave-one-out cross-validation (slower, more honest)
 python validate.py --plot       # also save plots to data/validation/
+python validate.py --csv        # export per-race results to data/validation/results.csv
 ```
 
 Quick mode reuses the saved pace model; LOOCV rebuilds the model excluding each race in turn. Both print a formatted table plus summary stats (MAE, bias, RMSE, P10-P90 coverage).
+
+### Validation plots (`--plot`)
+
+The `--plot` flag generates a 4-panel figure saved to `data/validation/validation_plots.png`:
+
+* **Error distribution (top-left):** Histogram of P50 prediction errors as a percentage of actual time. Negative values mean the model predicted a faster time than reality. The orange line marks the mean bias.
+* **Actual vs Predicted (top-right):** Scatter comparing actual finish times to predicted P50. Green dots fell within the P10-P90 confidence interval; red dots did not. Points on the dashed diagonal would be perfect predictions.
+* **Error by distance (bottom-left):** Box plots of error grouped by distance category, with sample counts shown. Reveals whether the model is systematically biased for certain race lengths.
+* **Residuals vs distance (bottom-right):** Raw error scatter against distance in km. Useful for spotting trends (e.g., larger errors at longer distances).
+
+Summary statistics (MAE, bias, RMSE, P10-P90 coverage) are annotated at the bottom of the figure.
+
+### CSV export (`--csv`)
+
+The `--csv` flag writes one row per validated race to `data/validation/results.csv`, including race metadata, actual and predicted times (both in seconds and H:MM:SS), error percentage, and whether the actual time fell within the P10-P90 band.
 
 ---
 

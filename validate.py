@@ -11,7 +11,8 @@ Usage:
     python validate.py              # quick mode
     python validate.py --loocv      # leave-one-out cross-validation
     python validate.py --plot       # quick mode + save plots
-    python validate.py --loocv --plot
+    python validate.py --csv        # export results to data/validation/results.csv
+    python validate.py --loocv --plot --csv
 """
 
 import argparse
@@ -296,6 +297,32 @@ def print_results_table(results: list[dict]):
 
 
 # ---------------------------------------------------------------------------
+# CSV export (optional)
+# ---------------------------------------------------------------------------
+
+def save_csv(results: list[dict], output_dir: str):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    out_path = os.path.join(output_dir, "results.csv")
+
+    df = pd.DataFrame(results)
+    df["actual_hhmmss"] = df["actual_s"].apply(format_hhmmss)
+    df["p10_hhmmss"] = df["p10_s"].apply(format_hhmmss)
+    df["p50_hhmmss"] = df["p50_s"].apply(format_hhmmss)
+    df["p90_hhmmss"] = df["p90_s"].apply(format_hhmmss)
+
+    cols = [
+        "race_id", "name", "date", "distance_km", "gain_m", "median_alt",
+        "actual_s", "actual_hhmmss",
+        "p10_s", "p10_hhmmss",
+        "p50_s", "p50_hhmmss",
+        "p90_s", "p90_hhmmss",
+        "error_pct", "within_ci",
+    ]
+    df[cols].to_csv(out_path, index=False)
+    print(f"Results saved to {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Plots (optional)
 # ---------------------------------------------------------------------------
 
@@ -303,10 +330,18 @@ def save_plots(results: list[dict], output_dir: str):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     df = pd.DataFrame(results)
+    n_races = len(df)
+    errors = df["error_pct"]
+    mae = np.abs(errors).mean()
+    bias = errors.mean()
+    rmse = np.sqrt((errors**2).mean())
+    coverage = df["within_ci"].sum() / n_races * 100
+
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle("Race Prediction Validation", fontsize=14, fontweight="bold")
 
@@ -314,36 +349,43 @@ def save_plots(results: list[dict], output_dir: str):
     ax = axes[0, 0]
     ax.hist(df["error_pct"], bins=15, alpha=0.7, edgecolor="black", color="steelblue")
     ax.axvline(0, color="red", ls="--", lw=1.5)
-    ax.axvline(df["error_pct"].mean(), color="orange", ls="-", lw=1.5, label=f"mean={df['error_pct'].mean():.1f}%")
-    ax.set_xlabel("Prediction error (%)")
+    ax.axvline(bias, color="orange", ls="-", lw=1.5, label=f"mean={bias:.1f}%")
+    ax.set_xlabel("Prediction error (%)  [negative = too fast]")
     ax.set_ylabel("Count")
-    ax.set_title("Error distribution (P50)")
+    ax.set_title(f"Error distribution — P50 (N={n_races})")
     ax.legend()
     ax.grid(alpha=0.3)
 
     # 2) Actual vs predicted scatter
     ax = axes[0, 1]
-    colors = ["green" if w else "red" for w in df["within_ci"]]
-    ax.scatter(df["actual_s"] / 3600, df["p50_s"] / 3600, c=colors, alpha=0.7, s=50)
+    within = df["within_ci"]
+    ax.scatter(df.loc[within, "actual_s"] / 3600, df.loc[within, "p50_s"] / 3600,
+               c="green", alpha=0.7, s=50, label=f"within P10-P90 ({within.sum()})")
+    ax.scatter(df.loc[~within, "actual_s"] / 3600, df.loc[~within, "p50_s"] / 3600,
+               c="red", alpha=0.7, s=50, label=f"outside P10-P90 ({(~within).sum()})")
     lims = [
         min((df["actual_s"] / 3600).min(), (df["p50_s"] / 3600).min()) * 0.9,
         max((df["actual_s"] / 3600).max(), (df["p50_s"] / 3600).max()) * 1.1,
     ]
-    ax.plot(lims, lims, "r--", lw=1.5, label="perfect")
+    ax.plot(lims, lims, "r--", lw=1.5, alpha=0.5)
     ax.set_xlabel("Actual (hours)")
     ax.set_ylabel("Predicted P50 (hours)")
     ax.set_title("Actual vs Predicted")
-    ax.legend()
+    ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
 
-    # 3) Error by distance (box)
+    # 3) Error by distance (box) with sample counts
     ax = axes[1, 0]
     bins_edges = [0, 30, 60, 100, 300]
     labels = ["<30k", "30-60k", "60-100k", "100k+"]
     df["dist_bin"] = pd.cut(df["distance_km"], bins=bins_edges, labels=labels)
-    box_data = [df.loc[df["dist_bin"] == lab, "error_pct"].dropna().values for lab in labels]
-    box_data = [d for d in box_data if len(d) > 0]
-    box_labels = [lab for lab, d in zip(labels, [df.loc[df["dist_bin"] == lab, "error_pct"].dropna() for lab in labels]) if len(d) > 0]
+    box_data = []
+    box_labels = []
+    for lab in labels:
+        vals = df.loc[df["dist_bin"] == lab, "error_pct"].dropna().values
+        if len(vals) > 0:
+            box_data.append(vals)
+            box_labels.append(f"{lab}\n(n={len(vals)})")
     if box_data:
         ax.boxplot(box_data, tick_labels=box_labels)
     ax.axhline(0, color="red", ls="--", alpha=0.7)
@@ -360,7 +402,12 @@ def save_plots(results: list[dict], output_dir: str):
     ax.set_title("Residuals vs distance")
     ax.grid(alpha=0.3)
 
-    plt.tight_layout()
+    # Summary stats annotation
+    stats_text = f"MAE={mae:.1f}%   Bias={bias:+.1f}%   RMSE={rmse:.1f}%   Coverage(P10-P90)={coverage:.0f}%"
+    fig.text(0.5, 0.01, stats_text, ha="center", fontsize=10, fontstyle="italic",
+             bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", alpha=0.8))
+
+    plt.tight_layout(rect=[0, 0.04, 1, 1])
     out_path = os.path.join(output_dir, "validation_plots.png")
     plt.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close()
@@ -375,6 +422,7 @@ def main():
     parser = argparse.ArgumentParser(description="Validate race predictions against actual results.")
     parser.add_argument("--loocv", action="store_true", help="Leave-one-out cross-validation (slower, more honest)")
     parser.add_argument("--plot", action="store_true", help="Save validation plots to data/validation/")
+    parser.add_argument("--csv", action="store_true", help="Export results to data/validation/results.csv")
     args = parser.parse_args()
 
     # Load race history
@@ -397,6 +445,9 @@ def main():
         sys.exit(1)
 
     print_results_table(results)
+
+    if args.csv:
+        save_csv(results, "data/validation")
 
     if args.plot:
         save_plots(results, "data/validation")
