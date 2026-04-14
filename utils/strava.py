@@ -8,15 +8,35 @@ import config
 
 os.makedirs(config.CACHE_DIR, exist_ok=True)
 
-def _save_tokens(tokens: Dict[str, Any]):
+# -- Default file-based token storage --
+
+def _default_save_tokens(tokens: Dict[str, Any]):
     with open(config.TOKENS_PATH, "w") as f:
         json.dump(tokens, f)
 
-def _load_tokens() -> Dict[str, Any] | None:
+def _default_load_tokens() -> Dict[str, Any] | None:
     if not os.path.exists(config.TOKENS_PATH):
         return None
     with open(config.TOKENS_PATH, "r") as f:
         return json.load(f)
+
+def _default_disconnect():
+    try:
+        os.remove(config.TOKENS_PATH)
+    except FileNotFoundError:
+        pass
+
+# -- Pluggable function pointers (swapped by app.py on cloud) --
+_save_tokens = _default_save_tokens
+_load_tokens = _default_load_tokens
+_disconnect_fn = _default_disconnect
+
+def set_token_store(save_fn, load_fn, disconnect_fn):
+    """Replace the token storage backend (e.g. for session_state on cloud)."""
+    global _save_tokens, _load_tokens, _disconnect_fn
+    _save_tokens = save_fn
+    _load_tokens = load_fn
+    _disconnect_fn = disconnect_fn
 
 def build_auth_url(client_id: str, redirect_uri: str, scope: str="read,activity:read_all", approval_prompt: str="auto") -> str:
     params = {
@@ -50,10 +70,7 @@ def _get_headers(access_token: str) -> Dict[str, str]:
     return {"Authorization": f"Bearer {access_token}"}
 
 def _disconnect_strava():
-    try:
-        os.remove(config.TOKENS_PATH)
-    except FileNotFoundError:
-        pass
+    _disconnect_fn()
 
 def ensure_token(client_id: str, client_secret: str) -> Dict[str, Any] | None:
     tokens = _load_tokens()

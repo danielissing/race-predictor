@@ -207,3 +207,47 @@ MILES_TO_KM = 1.609344
 SECONDS_PER_HOUR = 3600
 MINUTES_PER_HOUR = 60
 MONTH_LENGTH = 30.437  # Average days per month
+
+
+# ========================================
+# ENVIRONMENT DETECTION (local vs cloud)
+# ========================================
+
+def is_cloud() -> bool:
+    """Return True when running on Streamlit Community Cloud."""
+    import os
+    return (
+        os.environ.get("IS_CLOUD", "") == "1"
+        or os.environ.get("STREAMLIT_SHARING_MODE", "") != ""
+        or os.path.isdir("/mount/src")
+    )
+
+
+def get_app_credentials() -> dict:
+    """Load Strava client_id / client_secret.
+
+    Checks st.secrets first (cloud), falls back to the local JSON file.
+    """
+    try:
+        import streamlit as st
+        sec = st.secrets["strava"]
+        return {"client_id": str(sec["client_id"]),
+                "client_secret": str(sec["client_secret"])}
+    except Exception:
+        pass
+    # Local fallback
+    import json
+    try:
+        with open(APP_CREDS_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def get_redirect_uri() -> str:
+    """Return the OAuth redirect URI for the current environment."""
+    try:
+        import streamlit as st
+        return str(st.secrets["strava"]["redirect_uri"])
+    except Exception:
+        return "http://localhost:8501"
