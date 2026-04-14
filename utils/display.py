@@ -112,8 +112,15 @@ def display_course_details(course):
         m = folium.Map(
             location=[center_lat, center_lon],
             zoom_start=zoom_start,
-            tiles="OpenStreetMap"
+            tiles=None,
         )
+        folium.TileLayer(
+            tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+            attr='Map data &copy; OpenStreetMap contributors, SRTM | '
+                 'Map style &copy; OpenTopoMap (CC-BY-SA)',
+            name="Terrain",
+            max_zoom=17,
+        ).add_to(m)
 
         # Add the route
         route = list(zip(course.df_raw['lat'], course.df_raw['lon']))
@@ -127,13 +134,19 @@ def display_course_details(course):
         for c in clusters:
             label = "/".join(c['labels'])
             km_list = ", ".join(f"{k:.1f} km" for k in sorted(c['kms']))
-            folium.Marker(
+            folium.CircleMarker(
                 location=[c['lat'], c['lon']],
+                radius=8,
+                color='red',
+                fill=True,
+                fill_color='red',
+                fill_opacity=0.7,
                 tooltip=label,
-                popup=folium.Popup(html=f"<b>{label}</b><br/>{km_list}", max_width=250)
+                popup=folium.Popup(html=f"<b>{label}</b><br/>{km_list}", max_width=250),
             ).add_to(m)
 
-        st_folium(m, width=None, height=400, returned_objects=[])
+        st_folium(m, width=None, height=400, returned_objects=[],
+                  center=[center_lat, center_lon], zoom=zoom_start)
 
 
 def display_segments_overview(course):
