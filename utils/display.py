@@ -108,19 +108,12 @@ def display_course_details(course):
         else:
             zoom_start = 13
 
-        # Initialize map with center and zoom
+        # Initialize map with terrain tiles (Esri CDN, no CSP issues)
         m = folium.Map(
             location=[center_lat, center_lon],
             zoom_start=zoom_start,
-            tiles=None,
+            tiles="Esri.WorldTopoMap",
         )
-        folium.TileLayer(
-            tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-            attr='Map data &copy; OpenStreetMap contributors, SRTM | '
-                 'Map style &copy; OpenTopoMap (CC-BY-SA)',
-            name="Terrain",
-            max_zoom=17,
-        ).add_to(m)
 
         # Add the route
         route = list(zip(course.df_raw['lat'], course.df_raw['lon']))
@@ -129,18 +122,23 @@ def display_course_details(course):
         # Fit bounds after adding the route
         m.fit_bounds([[lat_min, lon_min], [lat_max, lon_max]])
 
-        # Add aid station markers
+        # Add aid station markers (DivIcon = pure HTML, no external images)
         clusters = aid_station_markers(course.df_raw, course.aid_km)
         for c in clusters:
             label = "/".join(c['labels'])
             km_list = ", ".join(f"{k:.1f} km" for k in sorted(c['kms']))
-            folium.CircleMarker(
+            icon = folium.DivIcon(
+                html=f'<div style="background:#e74c3c;color:#fff;border-radius:50%;'
+                     f'width:24px;height:24px;line-height:24px;text-align:center;'
+                     f'font-size:11px;font-weight:bold;border:2px solid #fff;'
+                     f'box-shadow:0 1px 3px rgba(0,0,0,.4);">'
+                     f'{label}</div>',
+                icon_size=(24, 24),
+                icon_anchor=(12, 12),
+            )
+            folium.Marker(
                 location=[c['lat'], c['lon']],
-                radius=8,
-                color='red',
-                fill=True,
-                fill_color='red',
-                fill_opacity=0.7,
+                icon=icon,
                 tooltip=label,
                 popup=folium.Popup(html=f"<b>{label}</b><br/>{km_list}", max_width=250),
             ).add_to(m)
