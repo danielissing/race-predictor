@@ -16,6 +16,8 @@ def save_pace_model_to_disk(pace_model):
     Args:
         pace_model: PaceModel object to save
     """
+    if config.is_cloud():
+        return
     try:
         Path(config.DATA_DIR).mkdir(exist_ok=True)
         pace_model.pace_df.to_csv(config.PACE_CURVES_PATH, index=False)
@@ -84,6 +86,8 @@ def load_excluded_race_ids() -> set:
 
 def save_excluded_race_ids(excluded_ids: set):
     """Persist the set of excluded race IDs to CSV."""
+    if config.is_cloud():
+        return
     Path(config.DATA_DIR).mkdir(exist_ok=True)
     df = pd.DataFrame({"id": sorted(excluded_ids)})
     df.to_csv(config.EXCLUDED_RACES_PATH, index=False)

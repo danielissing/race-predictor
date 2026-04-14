@@ -10,7 +10,7 @@ if os.environ.get("RACE_PREDICTOR_DEBUG"):
     logging.getLogger("prediction").setLevel(logging.DEBUG)
 
 # Local imports
-from utils.strava import build_auth_url, exchange_code_for_token, ensure_token, list_activities
+from utils.strava import build_auth_url, exchange_code_for_token, ensure_token, list_activities, set_token_store
 from utils.persistence import load_saved_app_creds, save_app_creds, forget_app_creds, load_pace_model_from_disk, save_pace_model_to_disk, load_excluded_race_ids
 from utils.pace_builder import build_pace_curves_from_races
 from utils.display import (
@@ -21,6 +21,17 @@ from utils.display import (
 from utils.prediction import run_prediction_simulation
 from models import Course, PaceModel
 import config
+
+# -- Cloud token store (session_state-backed) --
+if config.is_cloud():
+    _TOKEN_KEY = "_strava_tokens"
+    def _cloud_save(tokens):
+        st.session_state[_TOKEN_KEY] = tokens
+    def _cloud_load():
+        return st.session_state.get(_TOKEN_KEY)
+    def _cloud_disconnect():
+        st.session_state.pop(_TOKEN_KEY, None)
+    set_token_store(_cloud_save, _cloud_load, _cloud_disconnect)
 
 # -- UI helper functions --
 
@@ -51,14 +62,15 @@ def handle_oauth_callback():
         return
 
     code = qs["code"]
-    saved = load_saved_app_creds(config.APP_CREDS_PATH)
-    client_id = saved.get("client_id", "")
-    client_secret = saved.get("client_secret", "")
+    creds = config.get_app_credentials()
+    client_id = creds.get("client_id", "")
+    client_secret = creds.get("client_secret", "")
 
     if client_id and client_secret:
         try:
             exchange_code_for_token(client_id, client_secret, code)
-            save_app_creds(client_id, client_secret, config.DATA_DIR, config.APP_CREDS_PATH)
+            if not config.is_cloud():
+                save_app_creds(client_id, client_secret, config.DATA_DIR, config.APP_CREDS_PATH)
             st.success("Strava connected ✅")
             st.query_params.clear()
         except Exception as e:
@@ -158,13 +170,13 @@ st.title("🏃‍♂️ Race Time Predictor")
 
 # Initialize session state
 if 'pace_model' not in st.session_state:
-    st.session_state.pace_model = load_pace_model_from_disk()
+    st.session_state.pace_model = None if config.is_cloud() else load_pace_model_from_disk()
 if 'course' not in st.session_state:
     st.session_state.course = None
 if 'eta_results' not in st.session_state:
     st.session_state.eta_results = None
 if 'excluded_race_ids' not in st.session_state:
-    st.session_state.excluded_race_ids = load_excluded_race_ids()
+    st.session_state.excluded_race_ids = set() if config.is_cloud() else load_excluded_race_ids()
 
 # Handle OAuth callback
 handle_oauth_callback()
@@ -175,29 +187,52 @@ tab_race, tab_data = st.tabs(["🏁 Upcoming race", "📚 My data"])
 # --- Sidebar ---
 with st.sidebar:
     st.header("1. Strava Connection")
-    saved = load_saved_app_creds(config.APP_CREDS_PATH)
-    client_id = st.text_input("Client ID", value=saved.get("client_id", ""))
-    client_secret = st.text_input("Client Secret", type="password", value=saved.get("client_secret", ""))
 
-    tokens = ensure_token(client_id, client_secret)
+    if config.is_cloud():
+        # Cloud mode: shared app credentials from st.secrets
+        creds = config.get_app_credentials()
+        client_id = creds.get("client_id", "")
+        client_secret = creds.get("client_secret", "")
+        redirect_uri = config.get_redirect_uri()
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
+        tokens = ensure_token(client_id, client_secret)
+
         if tokens:
             st.success("Connected ✅")
+            if st.button("Disconnect Strava"):
+                from utils.strava import _disconnect_strava
+                _disconnect_strava()
+                st.rerun()
         elif client_id and client_secret:
-            st.link_button("Connect", url=build_auth_url(client_id, "http://localhost:8501"))
+            st.link_button("Connect with Strava", url=build_auth_url(client_id, redirect_uri))
+        else:
+            st.error("Strava app credentials not configured in secrets.")
+    else:
+        # Local mode: user enters their own credentials
+        saved = load_saved_app_creds(config.APP_CREDS_PATH)
+        client_id = st.text_input("Client ID", value=saved.get("client_id", ""))
+        client_secret = st.text_input("Client Secret", type="password", value=saved.get("client_secret", ""))
+        redirect_uri = config.get_redirect_uri()
 
-    with col2:
-        if st.button("Save creds", disabled=not (client_id and client_secret)):
-            save_app_creds(client_id, client_secret, config.DATA_DIR, config.APP_CREDS_PATH)
-            st.success("Saved!")
+        tokens = ensure_token(client_id, client_secret)
 
-    with col3:
-        if st.button("Forget creds"):
-            forget_app_creds(config.APP_CREDS_PATH)
-            st.success("Forgotten!")
-            st.rerun()
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if tokens:
+                st.success("Connected ✅")
+            elif client_id and client_secret:
+                st.link_button("Connect", url=build_auth_url(client_id, redirect_uri))
+
+        with col2:
+            if st.button("Save creds", disabled=not (client_id and client_secret)):
+                save_app_creds(client_id, client_secret, config.DATA_DIR, config.APP_CREDS_PATH)
+                st.success("Saved!")
+
+        with col3:
+            if st.button("Forget creds"):
+                forget_app_creds(config.APP_CREDS_PATH)
+                st.success("Forgotten!")
+                st.rerun()
 
     st.header("2. Build Pace Model")
     recency_mode = st.select_slider("Recency Weighting", ["off", "mild", "medium"], value="mild")
@@ -210,7 +245,8 @@ with st.sidebar:
                 excluded_ids=st.session_state.excluded_race_ids,
             )
             st.session_state.pace_model = PaceModel(pace_df, used_df, meta)
-            save_pace_model_to_disk(st.session_state.pace_model)
+            if not config.is_cloud():
+                save_pace_model_to_disk(st.session_state.pace_model)
             st.success("Pace model built!")
 
     st.header("3. Course Details")
