@@ -65,8 +65,10 @@ def handle_oauth_callback():
     creds = config.get_app_credentials()
     client_id = creds.get("client_id", "")
     client_secret = creds.get("client_secret", "")
+    worker_url = config.get_worker_url()
 
-    if client_id and client_secret:
+    # With Worker, client_secret is not needed (Worker holds it)
+    if client_id and (client_secret or worker_url):
         try:
             exchange_code_for_token(client_id, client_secret, code)
             if not config.is_cloud():
@@ -194,6 +196,8 @@ with st.sidebar:
         client_id = creds.get("client_id", "")
         client_secret = creds.get("client_secret", "")
         redirect_uri = config.get_redirect_uri()
+        worker_url = config.get_worker_url()
+        callback_state = config.get_callback_state() if worker_url else ""
 
         tokens = ensure_token(client_id, client_secret)
 
@@ -203,8 +207,11 @@ with st.sidebar:
                 from utils.strava import _disconnect_strava
                 _disconnect_strava()
                 st.rerun()
-        elif client_id and client_secret:
-            st.link_button("Connect with Strava", url=build_auth_url(client_id, redirect_uri))
+        elif client_id and (client_secret or worker_url):
+            st.link_button(
+                "Connect with Strava",
+                url=build_auth_url(client_id, redirect_uri, state=callback_state),
+            )
         else:
             st.error("Strava app credentials not configured in secrets.")
     else:

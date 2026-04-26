@@ -223,16 +223,30 @@ def is_cloud() -> bool:
     )
 
 
+def get_worker_url() -> str:
+    """Return the Cloudflare Worker URL if configured, empty string otherwise."""
+    try:
+        import streamlit as st
+        return str(st.secrets["strava"]["worker_url"])
+    except Exception:
+        return ""
+
+
 def get_app_credentials() -> dict:
     """Load Strava client_id / client_secret.
 
-    Checks st.secrets first (cloud), falls back to the local JSON file.
+    When a Worker URL is configured on cloud, client_secret is not required
+    (the Worker holds it). Checks st.secrets first (cloud), falls back to
+    the local JSON file.
     """
     try:
         import streamlit as st
         sec = st.secrets["strava"]
-        return {"client_id": str(sec["client_id"]),
-                "client_secret": str(sec["client_secret"])}
+        creds = {"client_id": str(sec["client_id"])}
+        # client_secret is optional when Worker is configured
+        if "client_secret" in sec:
+            creds["client_secret"] = str(sec["client_secret"])
+        return creds
     except Exception:
         pass
     # Local fallback
@@ -245,9 +259,29 @@ def get_app_credentials() -> dict:
 
 
 def get_redirect_uri() -> str:
-    """Return the OAuth redirect URI for the current environment."""
+    """Return the OAuth redirect URI for the current environment.
+
+    When a Worker URL is configured, the redirect goes through the Worker.
+    """
+    worker_url = get_worker_url()
+    if worker_url:
+        return worker_url + "/callback"
     try:
         import streamlit as st
         return str(st.secrets["strava"]["redirect_uri"])
+    except Exception:
+        return "http://localhost:8501"
+
+
+def get_callback_state() -> str:
+    """Return the app's own URL for the Worker to redirect back to.
+
+    Only relevant when using the Worker callback relay.
+    """
+    try:
+        import streamlit as st
+        # On Streamlit Cloud, get the app's public URL from the browser
+        # Fall back to a reasonable default
+        return str(st.secrets["strava"].get("app_url", "http://localhost:8501"))
     except Exception:
         return "http://localhost:8501"

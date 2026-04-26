@@ -38,7 +38,7 @@ def set_token_store(save_fn, load_fn, disconnect_fn):
     _load_tokens = load_fn
     _disconnect_fn = disconnect_fn
 
-def build_auth_url(client_id: str, redirect_uri: str, scope: str="read,activity:read_all", approval_prompt: str="auto") -> str:
+def build_auth_url(client_id: str, redirect_uri: str, scope: str="read,activity:read_all", approval_prompt: str="auto", state: str="") -> str:
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -46,11 +46,22 @@ def build_auth_url(client_id: str, redirect_uri: str, scope: str="read,activity:
         "approval_prompt": approval_prompt,
         "scope": scope,
     }
+    if state:
+        params["state"] = state
     return f"{config.STRAVA_AUTH_URL}?{urlencode(params)}"
 
 def exchange_code_for_token(client_id: str, client_secret: str, code: str) -> Dict[str, Any]:
-    payload = {"client_id": client_id, "client_secret": client_secret, "code": code, "grant_type": "authorization_code"}
-    r = requests.post(config.STRAVA_TOKEN_URL, data=payload, timeout=config.DEFAULT_TIMEOUT)
+    worker_url = config.get_worker_url()
+    if worker_url:
+        # Worker mode: POST code to Worker (it adds the secret)
+        r = requests.post(
+            f"{worker_url}/exchange",
+            json={"code": code},
+            timeout=config.DEFAULT_TIMEOUT,
+        )
+    else:
+        payload = {"client_id": client_id, "client_secret": client_secret, "code": code, "grant_type": "authorization_code"}
+        r = requests.post(config.STRAVA_TOKEN_URL, data=payload, timeout=config.DEFAULT_TIMEOUT)
     r.raise_for_status()
     tokens = r.json()
     tokens["obtained_at"] = int(time.time())
@@ -59,8 +70,18 @@ def exchange_code_for_token(client_id: str, client_secret: str, code: str) -> Di
     return tokens
 
 def _refresh_access_token(client_id: str, client_secret: str, refresh_token: str) -> Dict[str, Any]:
-    payload = {"client_id": client_id, "client_secret": client_secret, "grant_type": "refresh_token", "refresh_token": refresh_token}
-    r = requests.post(config.STRAVA_TOKEN_URL, data=payload, timeout=config.DEFAULT_TIMEOUT); r.raise_for_status()
+    worker_url = config.get_worker_url()
+    if worker_url:
+        # Worker mode: POST refresh_token to Worker (it adds the secret)
+        r = requests.post(
+            f"{worker_url}/refresh",
+            json={"refresh_token": refresh_token},
+            timeout=config.DEFAULT_TIMEOUT,
+        )
+    else:
+        payload = {"client_id": client_id, "client_secret": client_secret, "grant_type": "refresh_token", "refresh_token": refresh_token}
+        r = requests.post(config.STRAVA_TOKEN_URL, data=payload, timeout=config.DEFAULT_TIMEOUT)
+    r.raise_for_status()
     if r.status_code >= 400:
         raise requests.HTTPError(f"{r.status_code} {r.text}", response=r)
     tokens = r.json(); tokens["obtained_at"] = int(time.time()); _save_tokens(tokens);
