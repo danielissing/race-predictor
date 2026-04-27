@@ -57,28 +57,35 @@ App opens at `http://localhost:8501` (or similar)
 
 ---
 
-## Strava API Setup
+## Hosted Version (Streamlit Cloud)
 
-1. Create your own Strava API at `https://www.strava.com/settings/api`.
+A hosted version is available — no local setup needed. Just click **Connect with Strava** and authorize with your own Strava account. OAuth is handled through a Cloudflare Worker so your credentials stay secure.
+
+## Local Setup
+
+### Strava API Setup
+
+To run locally, you need your own Strava API app:
+
+1. Create a Strava API app at `https://www.strava.com/settings/api`.
 2. Set **Authorization Callback Domain** to `localhost` (the **Website** field is informational; `http://localhost:8501` is fine.)
 3. Note your **Client ID** and **Client Secret**.
 
-You don’t need to add a Redirect URI per se; the app uses `http://localhost:8501` and Strava only checks the domain (`localhost`) against your Authorization Callback Domain.
+You don't need to add a Redirect URI per se; the app uses `http://localhost:8501` and Strava only checks the domain (`localhost`) against your Authorization Callback Domain.
 
 ![setup](https://github.com/danielissing/race-predictor/blob/main/images/api_setup.png)
----
 
-## Connecting the App to Strava
+### Connecting the App to Strava
 
-In the app’s left sidebar:
+In the app's left sidebar:
 
 1. Enter **Client ID** and **Client Secret** (see image below for where to find them).
 2. Click **Connect Strava** and approve.
-3. On success, you’ll see **Connected ✅**.
+3. On success, you'll see **Connected ✅**.
 
 ![api_details](https://github.com/danielissing/race-predictor/blob/main/images/strava_api_details.png)
 
-### Save creds (so you don’t retype next time)
+#### Save creds (so you don't retype next time)
 
 * Click **Save app creds** in the sidebar.
 * The app stores them in `data/strava_app.json` (plain JSON on your machine).
@@ -98,7 +105,7 @@ In the app’s left sidebar:
 * **Aid stations**: paste **cumulative** distances, e.g. `10, 21, 33, 50`.
 
   * Toggle **km / mi** for the input. All outputs are metric.
-* **Conditions**: Simple knob to adjusy for terrain and race-day conditions.
+* **Conditions**: Simple knob to adjust for terrain and race-day conditions.
 
 ![sidebar2](https://github.com/danielissing/race-predictor/blob/main/images/sidebar_2.png)
 #### Course map

@@ -1,7 +1,6 @@
 import math
 import pandas as pd
 import numpy as np
-import hashlib
 from utils.gpx_parsing import parse_gpx, parse_cumulative_dist
 from utils.elevation import resample_with_grade, segment_stats
 from utils.course_analysis import legs_from_aid_stations, distance_by_grade_bins
@@ -46,14 +45,6 @@ class Course:
                 self.leg_end_km.append(float(seg["dist_m"].iloc[-1]) / 1000.0)
 
         self.leg_ends_x = [min(1.0, km / max(self.total_km, config.EPSILON)) for km in self.leg_end_km]
-        
-    def _compute_fingerprint(self):
-        """
-        A deterministic key to decide when to recompute the course context.
-        """
-        h = hashlib.md5(self.gpx_bytes).hexdigest()
-        bins_sig = ",".join(f"{x:.4f}" for x in self.grade_bins)
-        return f"{h}|{self.aid_km_text.strip()}|{self.aid_units}|{bins_sig}|{self.step_length:.1f}|{self.step_window:.1f}"
         
 
 

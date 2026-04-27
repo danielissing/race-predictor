@@ -96,11 +96,6 @@ MOUNTAIN_DISTANCE_KM = 250  # Mountain ultra threshold
 # for ultra adjustments
 EXTREME_DISTANCE_FACTOR = 1.3  # Extra rest time multiplier
 EXTREME_FATIGUE_FACTOR = 1.08  # Extra fatigue multiplier
-# DEPRECATED: replaced by learned rest model — kept for reference
-# SHORT_REST_PCT = 0.01
-# MED_REST_PCT = 0.05
-# LONG_REST_PCT = 0.15
-# REST_SLOPE = 0.1  # Linear increase in rest time based on race time
 
 # Modeling fatigue
 FATIGUE_SLOPE = 0.0005 # Linear increase of fatigue factor based on race time
