@@ -63,7 +63,9 @@ def exchange_code_for_token(client_id: str, client_secret: str, code: str) -> Di
         payload = {"client_id": client_id, "client_secret": client_secret, "code": code, "grant_type": "authorization_code"}
         r = requests.post(config.STRAVA_TOKEN_URL, data=payload, timeout=config.DEFAULT_TIMEOUT)
     r.raise_for_status()
-    tokens = r.json()
+    data = r.json()
+    # Keep only the fields we need — drop athlete PII
+    tokens = {k: data[k] for k in ("access_token", "refresh_token", "expires_at", "token_type") if k in data}
     tokens["obtained_at"] = int(time.time())
     tokens["client_id_used"] = str(client_id)
     _save_tokens(tokens)
@@ -82,8 +84,6 @@ def _refresh_access_token(client_id: str, client_secret: str, refresh_token: str
         payload = {"client_id": client_id, "client_secret": client_secret, "grant_type": "refresh_token", "refresh_token": refresh_token}
         r = requests.post(config.STRAVA_TOKEN_URL, data=payload, timeout=config.DEFAULT_TIMEOUT)
     r.raise_for_status()
-    if r.status_code >= 400:
-        raise requests.HTTPError(f"{r.status_code} {r.text}", response=r)
     tokens = r.json(); tokens["obtained_at"] = int(time.time()); _save_tokens(tokens);
     return tokens
 

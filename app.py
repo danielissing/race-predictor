@@ -76,7 +76,7 @@ def handle_oauth_callback():
             st.success("Strava connected ✅")
             st.query_params.clear()
         except Exception as e:
-            st.error(f"OAuth error: {e}")
+            st.error("OAuth error — please try connecting again.")
 
 
 def run_predictions_ui(course: Course, conditions: int):
