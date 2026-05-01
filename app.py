@@ -1,5 +1,6 @@
 import logging
 import os
+import base64
 import streamlit as st
 import pandas as pd
 import hashlib
@@ -32,6 +33,36 @@ if config.is_cloud():
     def _cloud_disconnect():
         st.session_state.pop(_TOKEN_KEY, None)
     set_token_store(_cloud_save, _cloud_load, _cloud_disconnect)
+
+# -- Strava branding helpers --
+
+_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets", "strava")
+
+
+def _load_asset_b64(filename: str) -> str:
+    with open(os.path.join(_ASSETS_DIR, filename), "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+
+def strava_connect_button(auth_url: str):
+    """Render the official 'Connect with Strava' button (Strava brand guidelines)."""
+    b64 = _load_asset_b64("btn_strava_connect_with_orange_x2.png")
+    st.markdown(
+        f'<a href="{auth_url}" target="_self">'
+        f'<img src="data:image/png;base64,{b64}" alt="Connect with Strava" height="48"/>'
+        f'</a>',
+        unsafe_allow_html=True,
+    )
+
+
+def powered_by_strava():
+    """Render the official 'Powered by Strava' attribution logo."""
+    b64 = _load_asset_b64("api_logo_pwrdBy_strava_horiz_orange.png")
+    st.markdown(
+        f'<img src="data:image/png;base64,{b64}" alt="Powered by Strava" height="24"/>',
+        unsafe_allow_html=True,
+    )
+
 
 # -- UI helper functions --
 
@@ -208,10 +239,7 @@ with st.sidebar:
                 _disconnect_strava()
                 st.rerun()
         elif client_id and (client_secret or worker_url):
-            st.link_button(
-                "Connect with Strava",
-                url=build_auth_url(client_id, redirect_uri, state=callback_state),
-            )
+            strava_connect_button(build_auth_url(client_id, redirect_uri, state=callback_state))
         else:
             st.error("Strava app credentials not configured in secrets.")
     else:
@@ -228,7 +256,7 @@ with st.sidebar:
             if tokens:
                 st.success("Connected ✅")
             elif client_id and client_secret:
-                st.link_button("Connect", url=build_auth_url(client_id, redirect_uri))
+                strava_connect_button(build_auth_url(client_id, redirect_uri))
 
         with col2:
             if st.button("Save creds", disabled=not (client_id and client_secret)):
@@ -295,6 +323,9 @@ with st.sidebar:
         2: "🚀 Perfect - Everything ideal, PR attempt!"
     }
     st.caption(condition_labels[conditions])
+
+    st.divider()
+    powered_by_strava()
 
 # --- Race Tab ---
 with tab_race:

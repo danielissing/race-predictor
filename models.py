@@ -19,7 +19,6 @@ class Course:
         self.step_length = config.STEP_LENGTH
         self.step_window = config.STEP_WINDOW
         self._compute_context()
-        self._compute_fingerprint()
 
     def _compute_context(self):
         """
