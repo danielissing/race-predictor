@@ -48,7 +48,7 @@ def strava_connect_button(auth_url: str):
     """Render the official 'Connect with Strava' button (Strava brand guidelines)."""
     b64 = _load_asset_b64("btn_strava_connect_with_orange_x2.png")
     st.markdown(
-        f'<a href="{auth_url}" target="_self">'
+        f'<a href="{auth_url}" target="_blank">'
         f'<img src="data:image/png;base64,{b64}" alt="Connect with Strava" height="48"/>'
         f'</a>',
         unsafe_allow_html=True,
