@@ -387,7 +387,22 @@ def display_pace_model_races(pace_model, excluded_ids: set | None = None):
                 new_excluded.add(str(sorted_df.iloc[i]["id"]))
         save_excluded_race_ids(new_excluded)
         st.session_state["excluded_race_ids"] = new_excluded
-        st.success(f"Saved {len(new_excluded)} exclusion(s). Rebuild your model to apply.")
+
+        # Rebuild model from cached streams (no Strava API calls)
+        from utils.pace_builder import rebuild_from_cache
+        from utils.persistence import save_pace_model_to_disk
+        from models import PaceModel
+
+        recency_mode = pace_model.meta.get("recency_mode", "mild")
+        with st.spinner("Rebuilding model..."):
+            pace_df, used_df, meta = rebuild_from_cache(
+                pace_model.used_races, new_excluded,
+                config.GRADE_BINS, recency_mode,
+            )
+            new_model = PaceModel(pace_df, used_df, meta)
+            st.session_state.pace_model = new_model
+            if not config.is_cloud():
+                save_pace_model_to_disk(new_model)
         st.rerun()
 
 
