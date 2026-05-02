@@ -70,6 +70,20 @@ def build_pace_curves_from_races(
         if race_data:
             used_race_metadata.append(race_data)
 
+    return _build_model_from_samples(
+        bins, speed_samples_by_bin, weight_samples_by_bin,
+        used_race_metadata, recency_mode,
+    )
+
+
+def _build_model_from_samples(
+        bins: list,
+        speed_samples_by_bin: list,
+        weight_samples_by_bin: list,
+        used_race_metadata: List[Dict],
+        recency_mode: str,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
+    """Shared post-processing: fit all sub-models from collected race samples."""
     # Collect rest data and fatigue data from processed races (strip from metadata before DataFrame)
     rest_data_list = [r["_rest_data"] for r in used_race_metadata if r.get("_rest_data")]
     fatigue_data_list = [r["_fatigue_data"] for r in used_race_metadata if r.get("_fatigue_data")]
@@ -114,6 +128,54 @@ def build_pace_curves_from_races(
     meta["variance_n_races"] = int(variance_n)
 
     return curves_df, used_races_df, meta
+
+
+def rebuild_from_cache(
+        used_races_df: pd.DataFrame,
+        excluded_ids: set,
+        bins: list,
+        recency_mode: str = "mild",
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
+    """Rebuild pace model from locally cached streams — no Strava API calls.
+
+    Re-processes every race in *used_races_df* whose streams are already on
+    disk, skipping any IDs in *excluded_ids*.
+    """
+    n_bins = len(bins) - 1
+    speed_samples_by_bin = [[] for _ in range(n_bins)]
+    weight_samples_by_bin = [[] for _ in range(n_bins)]
+    used_race_metadata = []
+
+    for _, row in used_races_df.iterrows():
+        race_id = str(row["id"])
+        if excluded_ids and race_id in excluded_ids:
+            continue
+
+        streams = load_streams(row["id"])
+        if not streams:
+            continue
+
+        # Reconstruct an activity-like dict from the DataFrame row
+        activity = {
+            "id": row["id"],
+            "start_date": row.get("date", ""),
+            "elapsed_time": row.get("elapsed_time_s", 0),
+            "distance": row.get("distance_km", 0) * 1000,
+            "name": row.get("name", "(unnamed)"),
+        }
+
+        race_data = _process_single_race(
+            "", activity, bins, n_bins, recency_mode,
+            speed_samples_by_bin, weight_samples_by_bin,
+            streams=streams,
+        )
+        if race_data:
+            used_race_metadata.append(race_data)
+
+    return _build_model_from_samples(
+        bins, speed_samples_by_bin, weight_samples_by_bin,
+        used_race_metadata, recency_mode,
+    )
 
 
 def _extract_rest_data(streams: Dict, elapsed_time_s: float, distance_km: float) -> Dict[str, Any] | None:
@@ -467,7 +529,8 @@ def _process_single_race(
         n_bins: int,
         recency_mode: str,
         speed_samples_by_bin: list,
-        weight_samples_by_bin: list
+        weight_samples_by_bin: list,
+        streams: Dict = None,
 ) -> Dict[str, Any]:
     """
     Process a single race activity and extract grade-specific pace data.
@@ -475,7 +538,8 @@ def _process_single_race(
     Returns race metadata if successfully processed, None otherwise.
     """
     activity_id = activity.get("id")
-    streams = get_activity_streams(access_token, activity_id)
+    if streams is None:
+        streams = get_activity_streams(access_token, activity_id)
 
     if not streams:
         return None
